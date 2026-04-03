@@ -10,6 +10,7 @@ package org.opensearch.datafusion.jni;
 
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.engine.exec.FileStats;
+import org.opensearch.vectorized.execution.jni.NativeLibraryLoader;
 
 import java.util.Map;
 
@@ -20,7 +21,7 @@ import java.util.Map;
 public final class NativeBridge {
 
     static {
-        NativeLibraryLoader.load("opensearch_datafusion_jni");
+        NativeLibraryLoader.registerClass(NativeBridge.class);
         initLogger();
     }
 

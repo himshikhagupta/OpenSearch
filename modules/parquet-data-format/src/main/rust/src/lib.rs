@@ -1,7 +1,6 @@
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// NOTE: #[global_allocator] is set in jni-entry crate (single .so entry point)
 
 use arrow::record_batch::RecordBatch;
 use arrow::compute::{concat_batches, sort_to_indices, take};
@@ -30,6 +29,7 @@ pub use writer_properties_builder::WriterPropertiesBuilder;
 // Re-export macros from the shared crate for logging
 pub use vectorized_exec_spi::{log_info, log_error, log_debug};
 pub mod profiler;
+pub mod ffm;
 
 /// Per-writer sort configuration stored at create time, consumed at close time.
 struct SortConfig {
@@ -1463,3 +1463,23 @@ mod tests {
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Native bridge registration — SPI for single .so classloader binding
+// ═══════════════════════════════════════════════════════════════════
+
+vectorized_exec_spi::register_native_bridge!("com.parquet.parquetdataformat.bridge.RustBridge");
+
+/// Allocate 1MB via mimalloc (through Vec), leak it, return the pointer as jlong.
+/// Datafusion will free it — proving shared allocator.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_allocateTestBuffer(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    size: jni::sys::jlong,
+) -> jni::sys::jlong {
+    let buf: Vec<u8> = vec![42u8; size as usize];
+    let ptr = Box::into_raw(buf.into_boxed_slice()) as *mut u8;
+    ptr as jni::sys::jlong
+}
+

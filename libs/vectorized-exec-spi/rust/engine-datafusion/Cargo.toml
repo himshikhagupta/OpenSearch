@@ -1,0 +1,57 @@
+[package]
+name = "opensearch-datafusion"
+version = "0.1.0"
+edition = "2021"
+description = "DataFusion integration for OpenSearch"
+license = "Apache-2.0"
+
+[lib]
+name = "opensearch_datafusion"
+crate-type = ["rlib"]
+
+[dependencies]
+datafusion = { workspace = true }
+datafusion-expr = { workspace = true }
+datafusion-datasource = { workspace = true }
+datafusion-datasource-parquet = { workspace = true }
+datafusion-common = { workspace = true }
+datafusion-execution = { workspace = true }
+arrow-json = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-buffer = { workspace = true }
+dashmap = { workspace = true }
+jni = { workspace = true }
+datafusion-substrait = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tokio-metrics = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+vectorized-exec-spi = { workspace = true }
+parquet = { workspace = true }
+num_cpus = { workspace = true }
+object_store = { workspace = true }
+url = { workspace = true }
+liquid-cache-datafusion-local = { workspace = true }
+substrait = { workspace = true }
+tempfile = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+itertools = { workspace = true }
+rstest = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+tokio-stream = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+mimalloc = { workspace = true }
+datafusion-physical-expr = { workspace = true }
+downcast-rs = { workspace = true }
+linkme = { workspace = true }

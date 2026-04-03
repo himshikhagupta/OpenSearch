@@ -1,0 +1,17 @@
+[package]
+name = "opensearch-native-jni"
+version = "0.1.0"
+edition = "2021"
+description = "Single JNI cdylib combining all OpenSearch native modules"
+license = "Apache-2.0"
+
+[lib]
+name = "opensearch_native_jni"
+crate-type = ["cdylib"]
+
+[dependencies]
+opensearch-datafusion = { path = "../engine-datafusion" }
+opensearch-parquet-format = { path = "../parquet-format" }
+vectorized-exec-spi = { workspace = true }
+mimalloc = { workspace = true }
+jni = { workspace = true }

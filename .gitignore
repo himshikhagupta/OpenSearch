@@ -76,3 +76,5 @@ testfixtures_shared/
 
 # build files generated
 doc-tools/missing-doclet/bin/
+
+libs/vectorized-exec-spi/rust/target/

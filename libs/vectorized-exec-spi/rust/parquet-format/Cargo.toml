@@ -1,0 +1,41 @@
+[package]
+name = "opensearch-parquet-format"
+version = "0.1.0"
+edition = "2021"
+description = "Parquet data format support for OpenSearch"
+license = "Apache-2.0"
+
+[lib]
+name = "opensearch_parquet_format"
+crate-type = ["rlib"]
+
+# Exclude the standalone profiler binary — it references the old crate name
+[[bin]]
+name = "profiler"
+path = "src/bin/profiler.rs"
+required-features = ["__never"]  # effectively disables this bin target
+
+[dependencies]
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-buffer = { workspace = true }
+jni = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+vectorized-exec-spi = { workspace = true }
+parquet = { workspace = true }
+object_store = { workspace = true }
+url = { workspace = true }
+rayon = { workspace = true }
+tempfile = { workspace = true }
+lazy_static = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
+mimalloc = { workspace = true }
+linkme = { workspace = true }

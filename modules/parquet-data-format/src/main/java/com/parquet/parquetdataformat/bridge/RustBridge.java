@@ -1,5 +1,7 @@
 package com.parquet.parquetdataformat.bridge;
 
+import org.opensearch.vectorized.execution.jni.NativeLibraryLoader;
+
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
@@ -20,8 +22,7 @@ import java.util.List;
 public class RustBridge {
 
     static {
-        NativeLibraryLoader.load("parquet_dataformat_jni");
-
+        NativeLibraryLoader.registerClass(RustBridge.class);
         initLogger();
     }
 

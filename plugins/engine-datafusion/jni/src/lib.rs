@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// NOTE: #[global_allocator] is set in jni-entry crate (single .so entry point)
 
 use std::num::NonZeroUsize;
 /*
@@ -53,6 +52,7 @@ mod indexed_query_executor;
 mod indexed_table;
 mod project_row_id_analyzer;
 pub mod logger;
+pub mod ffm;
 
 // Import logger macros from shared crate
 use vectorized_exec_spi::{log_info, log_error, log_debug};
@@ -1102,3 +1102,25 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_executeIn
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Native bridge registration — SPI for single .so classloader binding
+// ═══════════════════════════════════════════════════════════════════
+
+vectorized_exec_spi::register_native_bridge!("org.opensearch.datafusion.jni.NativeBridge");
+
+/// Free a buffer that was allocated by parquet module's allocateTestBuffer.
+/// If mimalloc is shared (single .so), this works. If separate, this segfaults.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_freeTestBuffer(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    ptr: jni::sys::jlong,
+    size: jni::sys::jlong,
+) {
+    unsafe {
+        let slice = std::slice::from_raw_parts_mut(ptr as *mut u8, size as usize);
+        let _ = Box::from_raw(slice as *mut [u8]);
+    }
+}
+
