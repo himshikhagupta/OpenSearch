@@ -91,6 +91,7 @@ task copyNativeToResources(type: Copy, dependsOn: buildRustLibrary) {
 }
 
 processResources.dependsOn copyNativeToResources
+sourcesJar.dependsOn copyNativeToResources
 
 // Expose the native lib location as a project property so plugins can reference it
 ext.nativeLibDir = nativeOutputDir
