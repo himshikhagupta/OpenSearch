@@ -111,6 +111,15 @@ public class ParquetDataFormatPlugin extends Plugin implements DataSourcePlugin 
         Supplier<RepositoriesService> repositoriesServiceSupplier
     ) {
         this.settings = clusterService.getSettings();
+
+        // Set the Rust-side memory budget for the parquet plugin.
+        // Use 50% of the ArrowBufferPool root limit as the Rust-side budget.
+        // Rust writers don't hold all data simultaneously (they flush row groups to disk),
+        // so the Rust budget can be smaller than the Java-side Arrow allocation limit.
+        // TODO: make this a configurable cluster setting
+        long nativeMemoryBudget = 5L * 1024 * 1024 * 1024; // 5GB — half of ArrowBufferPool's 10GB root
+        RustBridge.setMemoryLimit(nativeMemoryBudget);
+
         return super.createComponents(client, clusterService, threadPool, resourceWatcherService, scriptService, xContentRegistry, environment, nodeEnvironment, namedWriteableRegistry, indexNameExpressionResolver, repositoriesServiceSupplier);
     }
 

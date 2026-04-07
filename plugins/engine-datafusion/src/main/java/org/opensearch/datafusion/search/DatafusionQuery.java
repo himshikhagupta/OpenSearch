@@ -22,6 +22,7 @@ public class DatafusionQuery {
     private List<String> excludeFields;
     private Boolean isQueryPlanExplainEnabled;
     private int targetPartitionsCount;
+    private long contextId;
 
     public DatafusionQuery(String indexName, byte[] substraitBytes, List<SearchExecutor> searchExecutors) {
         this.indexName = indexName;
@@ -55,6 +56,10 @@ public class DatafusionQuery {
     }
 
     public int getTargetPartitionsCount() { return this.targetPartitionsCount; }
+
+    public void setContextId(long contextId) { this.contextId = contextId; }
+
+    public long getContextId() { return this.contextId; }
 
     public boolean isFetchPhase() {
         return this.isFetchPhase;

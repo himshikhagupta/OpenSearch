@@ -204,6 +204,7 @@ public class DataFusionBridge implements EngineBridge<byte[], DataFusionResultSt
             false,    // isQueryPlanExplainEnabled
             0,        // partitionCount — use engine default
             runtimePointer,
+            0L,       // contextId — not tracked in bridge path
             new ActionListener<Long>() {
                 @Override
                 public void onResponse(Long streamPointer) {

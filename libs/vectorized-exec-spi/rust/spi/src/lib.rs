@@ -13,3 +13,4 @@
 
 pub mod logger;
 pub mod native_registry;
+pub use linkme;

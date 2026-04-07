@@ -41,6 +41,10 @@ public class RustBridge {
 
     public static native long getFilteredNativeBytesUsed(String pathPrefix);
 
+    // Memory budget management
+    public static native void setMemoryLimit(long limitBytes);
+    public static native long[] getMemoryStats();
+
 
     // Native method declarations - these will be implemented in the JNI library
     public static native void mergeParquetFilesInRust(List<Path> inputFiles, String outputFile, String indexName, String sortKey, boolean isReverse);

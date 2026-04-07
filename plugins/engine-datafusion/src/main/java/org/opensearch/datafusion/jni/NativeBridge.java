@@ -30,6 +30,8 @@ public final class NativeBridge {
     // Runtime management
     public static native long createGlobalRuntime(long limit, long cacheManagerPtr, String spillDir, long spillLimit);
     public static native void closeGlobalRuntime(long ptr);
+    public static native void setComponentMemoryLimit(long limitBytes);
+    public static native void setOverheadBufferPercent(int percent);
 
     // Tokio runtime
     public static native long startTokioRuntimeMonitoring();
@@ -39,8 +41,8 @@ public final class NativeBridge {
     public static native void shutdownTokioRuntimeManager();
 
     // Query execution
-    public static native void executeQueryPhaseAsync(long readerPtr, String tableName, byte[] plan, boolean isQueryPlanExplainEnabled, int partitionCount, long runtimePtr, ActionListener<Long> listener);
-    public static native long executeFetchPhase(long readerPtr, long[] rowIds, String[] includeFields, String[] excludeFields, long runtimePtr);
+    public static native void executeQueryPhaseAsync(long readerPtr, String tableName, byte[] plan, boolean isQueryPlanExplainEnabled, int partitionCount, long runtimePtr, long contextId, ActionListener<Long> listener);
+    public static native long executeFetchPhase(long readerPtr, long[] rowIds, String[] includeFields, String[] excludeFields, long runtimePtr, long contextId);
 
     // File Stats
     public static native void fetchSegmentStats(long readerPtr, ActionListener<Map<String, FileStats>> listener);
@@ -48,7 +50,7 @@ public final class NativeBridge {
     // Stream operations
     public static native void streamNext(long runtime, long stream, ActionListener<Long> listener);
     public static native void streamGetSchema(long stream, ActionListener<Long> listener);
-    public static native void streamClose(long stream);
+    public static native void streamClose(long stream, long contextId);
 
     // Cache management
     public static native long createCustomCacheManager();

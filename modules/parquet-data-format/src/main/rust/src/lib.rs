@@ -30,6 +30,7 @@ pub use writer_properties_builder::WriterPropertiesBuilder;
 pub use vectorized_exec_spi::{log_info, log_error, log_debug};
 pub mod profiler;
 pub mod ffm;
+pub mod memory_budget;
 
 /// Per-writer sort configuration stored at create time, consumed at close time.
 struct SortConfig {
@@ -158,8 +159,23 @@ impl NativeParquetWriter {
                         if let Some(writer_arc) = WRITER_MANAGER.get(&temp_filename) {
                             log_debug!("[RUST] Writing RecordBatch to temp file");
                             let mut writer = writer_arc.lock().unwrap();
+                            let mem_before = writer.memory_size();
                             writer.write(&record_batch)?;
-                            log_info!("[RUST] Successfully wrote RecordBatch");
+                            let mem_after = writer.memory_size();
+                            // Track the delta in the plugin budget
+                            if mem_after > mem_before {
+                                let delta = mem_after - mem_before;
+                                if let Err(e) = memory_budget::try_reserve(delta) {
+                                    log_error!("[RUST] {}", e);
+                                    // Writer already accepted the data — we can't undo it,
+                                    // but we log the overrun. A future improvement could
+                                    // flush the writer before writing to stay within budget.
+                                }
+                            } else if mem_before > mem_after {
+                                // Writer flushed a row group internally, releasing memory
+                                memory_budget::release(mem_before - mem_after);
+                            }
+                            log_info!("[RUST] Successfully wrote RecordBatch (writer_mem={}B)", mem_after);
                             Ok(())
                         } else {
                             log_error!("[RUST] ERROR: No writer found for temp file: {}", temp_filename);
@@ -186,6 +202,11 @@ impl NativeParquetWriter {
             match Arc::try_unwrap(writer_arc) {
                 Ok(mutex) => {
                     let writer = mutex.into_inner().unwrap();
+                    // Release writer buffer memory from the budget before closing
+                    let writer_mem = writer.memory_size();
+                    if writer_mem > 0 {
+                        memory_budget::release(writer_mem);
+                    }
                     match writer.close() {
                         Ok(_) => {
                             log_info!("[RUST] Successfully closed temp writer for: {}", temp_filename);
@@ -285,10 +306,17 @@ impl NativeParquetWriter {
         let schema = batches[0].schema();
         let combined_batch = concat_batches(&schema, &batches)?;
 
+        // Estimate memory: combined batch holds all rows in memory
+        let sort_mem: usize = combined_batch.get_array_memory_size();
+        memory_budget::try_reserve(sort_mem).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
         let sorted_batch = Self::sort_batch(&combined_batch, sort_column, reverse_sort)?;
         let final_batch = Self::rewrite_row_ids(&sorted_batch, &schema)?;
 
         Self::write_final_file(output_filename, &final_batch, schema)?;
+
+        // Release sort memory
+        memory_budget::release(sort_mem);
         log_info!("[RUST] Sorted file written: {}", output_filename);
 
         Ok(())
@@ -425,8 +453,15 @@ impl NativeParquetWriter {
         let schema = all_batches[0].schema();
         let combined = concat_batches(&schema, &all_batches)?;
 
+        // Track merge memory in the budget
+        let merge_mem = combined.get_array_memory_size();
+        memory_budget::try_reserve(merge_mem).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
         // Final sort across all chunks
-        Self::sort_batch(&combined, sort_column, reverse)
+        let result = Self::sort_batch(&combined, sort_column, reverse);
+
+        memory_budget::release(merge_mem);
+        result
     }
 
     /// If a ___row_id column exists, rewrite it with sequential values 0..N.
@@ -838,6 +873,46 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_getF
     match NativeParquetWriter::get_filtered_writer_memory_usage(prefix) {
         Ok(memory) => memory as jlong,
         Err(_) => 0,
+    }
+}
+
+/// Set the memory limit for the parquet plugin. Called once from Java at startup.
+/// Java: `setMemoryLimit(long limitBytes)`
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_setMemoryLimit(
+    _env: JNIEnv,
+    _class: JClass,
+    limit_bytes: jlong,
+) {
+    memory_budget::set_memory_limit(limit_bytes as usize);
+}
+
+/// Returns [reserved, peak, limit] as a long array for the parquet plugin's memory budget.
+/// Java: `long[] getMemoryStats()`
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_getMemoryStats<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jni::sys::jlongArray {
+    let stats = [
+        memory_budget::reserved() as i64,
+        memory_budget::peak() as i64,
+        memory_budget::memory_limit() as i64,
+    ];
+    match env.new_long_array(3) {
+        Ok(arr) => {
+            if let Err(e) = env.set_long_array_region(&arr, 0, &stats) {
+                let _ = env.throw_new("java/lang/RuntimeException",
+                    &format!("Failed to set memory stats array: {:?}", e));
+                return std::ptr::null_mut();
+            }
+            arr.into_raw()
+        }
+        Err(e) => {
+            let _ = env.throw_new("java/lang/RuntimeException",
+                &format!("Failed to create memory stats array: {:?}", e));
+            std::ptr::null_mut()
+        }
     }
 }
 

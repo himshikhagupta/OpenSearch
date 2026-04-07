@@ -78,3 +78,6 @@ testfixtures_shared/
 doc-tools/missing-doclet/bin/
 
 libs/vectorized-exec-spi/rust/target/
+libs/vectorized-exec-spi/src/main/resources/
+libs/vectorized-exec-spi/rust/Cargo.lock
+modules/parquet-data-format/src/main/rust/Cargo.lock

@@ -83,6 +83,7 @@ use crate::runtime_manager::RuntimeManager;
 
 mod statistics_cache;
 mod eviction_policy;
+mod query_metrics;
 
 struct DataFusionRuntime {
     runtime_env: RuntimeEnv,
@@ -356,6 +357,28 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_createGlo
     Box::into_raw(Box::new(runtime)) as jlong
 }
 
+/// Set the component-level memory limit for the DataFusion plugin.
+/// Called from Java when the cluster setting is initialized or updated.
+#[no_mangle]
+pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_setComponentMemoryLimit(
+    _env: JNIEnv,
+    _class: JClass,
+    limit_bytes: jlong,
+) {
+    query_metrics::set_component_limit(limit_bytes as usize);
+}
+
+/// Set the overhead buffer percentage for estimating total plugin memory.
+/// Called from Java when the cluster setting is initialized or updated.
+#[no_mangle]
+pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_setOverheadBufferPercent(
+    _env: JNIEnv,
+    _class: JClass,
+    percent: jint,
+) {
+    query_metrics::set_overhead_buffer_percent(percent as usize);
+}
+
 #[no_mangle]
 pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_closeGlobalRuntime(
     _env: JNIEnv,
@@ -617,6 +640,7 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_executeQu
     is_query_plan_explain_enabled: jboolean,
     target_partitions: jint,
     runtime_ptr: jlong,
+    context_id: jlong,
     listener: JObject,
 ) {
     let manager = match TOKIO_RUNTIME_MANAGER.get() {
@@ -673,11 +697,18 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_executeQu
     let table_path = shard_view.table_path();
     let files_meta = shard_view.files_metadata();
 
-    spawn_jni_task(
-        &io_runtime,
-        "executeQueryPhaseAsync",
-        listener_ref,
-        query_executor::execute_query_with_cross_rt_stream(
+    // Check component-level capacity before accepting the query
+    let global_pool = runtime.runtime_env.memory_pool.clone();
+    if let Err(e) = query_metrics::check_component_capacity(global_pool.as_ref()) {
+        set_action_listener_error(&mut env, listener, &e);
+        return;
+    }
+
+    // Start per-query memory tracking
+    let query_pool = query_metrics::start_query_tracking(context_id, global_pool);
+
+    let query_future = async move {
+        let result = query_executor::execute_query_with_cross_rt_stream(
             table_path,
             files_meta,
             table_name,
@@ -686,7 +717,19 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_executeQu
             target_partitions,
             runtime,
             cpu_executor,
-        ),
+            query_pool.map(|p| p as Arc<dyn datafusion::execution::memory_pool::MemoryPool>),
+        ).await;
+        if result.is_err() {
+            query_metrics::stop_query_tracking(context_id);
+        }
+        result
+    };
+
+    spawn_jni_task(
+        &io_runtime,
+        "executeQueryPhaseAsync",
+        listener_ref,
+        query_future,
         |env, listener_ref, stream_pointer| set_action_listener_ok_global(env, listener_ref, stream_pointer),
     );
 }
@@ -844,7 +887,7 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_executeFe
     include_fields: JObjectArray,
     exclude_fields: JObjectArray,
     runtime_ptr: jlong,
-    callback: JObject,
+    context_id: jlong,
 ) -> jlong {
     let shard_view = unsafe { &*(shard_view_ptr as *const ShardView) };
     let runtime = unsafe { &*(runtime_ptr as *const DataFusionRuntime) };
@@ -896,8 +939,10 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_executeFe
         Some(m) => m,
         None => {
             log_error!("Runtime manager not initialized");
-            set_action_listener_error(&mut env, callback,
-                                    &DataFusionError::Execution("Runtime manager not initialized".to_string()));
+            let _ = env.throw_new(
+                "java/lang/RuntimeException",
+                "Runtime manager not initialized",
+            );
             return 0;
         }
     };
@@ -906,6 +951,19 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_executeFe
     let cpu_executor = manager.cpu_executor();
 
     io_runtime.block_on(async {
+        // Check component-level capacity before accepting the fetch
+        let global_pool = runtime.runtime_env.memory_pool.clone();
+        if let Err(e) = query_metrics::check_component_capacity(global_pool.as_ref()) {
+            let _ = env.throw_new(
+                "java/lang/RuntimeException",
+                format!("{}", e),
+            );
+            return 0;
+        }
+
+        // Start per-query memory tracking for fetch phase
+        let query_pool = query_metrics::start_query_tracking(context_id, global_pool);
+
         match query_executor::execute_fetch_phase(
             table_path,
             files_metadata,
@@ -914,14 +972,16 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_executeFe
             exclude_fields,
             runtime,
             cpu_executor,
+            query_pool.map(|p| p as Arc<dyn datafusion::execution::memory_pool::MemoryPool>),
         ).await {
             Ok(stream_ptr) => stream_ptr,
             Err(e) => {
+                query_metrics::stop_query_tracking(context_id);
                 let _ = env.throw_new(
                     "java/lang/RuntimeException",
                     format!("Failed to execute fetch phase: {}", e),
                 );
-                0 // return 0
+                0
             }
         }
     })
@@ -932,7 +992,9 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_streamClo
     _env: JNIEnv,
     _class: JClass,
     stream: jlong,
+    context_id: jlong,
 ) {
+    query_metrics::stop_query_tracking(context_id);
     let _ = unsafe { Box::from_raw(stream as *mut RecordBatchStreamAdapter<CrossRtStream>) };
 }
 

@@ -57,6 +57,7 @@ use crate::{CustomFileMeta, FileStats};
 use crate::DataFusionRuntime;
 use crate::project_row_id_analyzer::ProjectRowIdAnalyzer;
 use crate::absolute_row_id_optimizer::{AbsoluteRowIdOptimizer, ROW_BASE_FIELD_NAME, ROW_ID_FIELD_NAME};
+use datafusion::execution::memory_pool::MemoryPool;
 
 /// Executes a query using DataFusion with cross-runtime streaming capabilities.
 /// This function sets up the complete query execution pipeline including table registration,
@@ -113,6 +114,7 @@ pub async fn execute_query_with_cross_rt_stream(
     target_partitions: usize,
     runtime: &DataFusionRuntime,
     cpu_executor: DedicatedExecutor,
+    query_memory_pool: Option<Arc<dyn MemoryPool>>,
 ) -> Result<jlong, DataFusionError> {
     let object_meta: Arc<Vec<ObjectMeta>> = Arc::new(
         files_meta
@@ -130,15 +132,22 @@ pub async fn execute_query_with_cross_rt_stream(
 
     let runtimeEnv = &runtime.runtime_env;
 
-    let runtime_env = match RuntimeEnvBuilder::from_runtime_env(runtimeEnv)
+    let mut builder = RuntimeEnvBuilder::from_runtime_env(runtimeEnv)
         .with_cache_manager(
             CacheManagerConfig::default()
                 .with_list_files_cache(Some(list_file_cache.clone()))
                 .with_file_metadata_cache(Some(runtimeEnv.cache_manager.get_file_metadata_cache()))
                 .with_files_statistics_cache(runtimeEnv.cache_manager.get_file_statistic_cache()),
         )
-        .with_metadata_cache_limit(250 * 1024 * 1024) // 250 MB
-        .build() {
+        .with_metadata_cache_limit(250 * 1024 * 1024); // 250 MB
+
+    // If a per-query memory pool is provided, set it on the builder
+    // The per-query pool wraps the global pool, so global limits are still enforced
+    if let Some(pool) = query_memory_pool {
+        builder = builder.with_memory_pool(pool);
+    }
+
+    let runtime_env = match builder.build() {
         Ok(env) => env,
         Err(e) => {
             error!("Failed to build runtime env: {}", e);
@@ -352,6 +361,7 @@ pub async fn execute_fetch_phase(
     exclude_fields: Vec<String>,
     runtime: &DataFusionRuntime,
     cpu_executor: DedicatedExecutor,
+    query_memory_pool: Option<Arc<dyn MemoryPool>>,
 ) -> Result<jlong, DataFusionError> {
     // Create optimized Parquet access plans for targeted row retrieval
     // This converts absolute row IDs back to file-relative positions and creates
@@ -372,14 +382,20 @@ pub async fn execute_fetch_phase(
     };
     list_file_cache.put(&table_scoped_path, object_meta);
 
-    let runtime_env = RuntimeEnvBuilder::new()
+    let mut builder = RuntimeEnvBuilder::new()
         .with_cache_manager(
             CacheManagerConfig::default().with_list_files_cache(Some(list_file_cache))
                 .with_metadata_cache_limit(runtime.runtime_env.cache_manager.get_file_metadata_cache().cache_limit())
                 .with_file_metadata_cache(Some(runtime.runtime_env.cache_manager.get_file_metadata_cache().clone()))
                 .with_files_statistics_cache(runtime.runtime_env.cache_manager.get_file_statistic_cache()),
-        )
-        .build()?;
+        );
+
+    // If a per-query memory pool is provided, set it on the builder
+    if let Some(pool) = query_memory_pool {
+        builder = builder.with_memory_pool(pool);
+    }
+
+    let runtime_env = builder.build()?;
 
     let mut config = SessionConfig::new();
     config.options_mut().execution.parquet.pushdown_filters = true;
