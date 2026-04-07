@@ -83,76 +83,19 @@ dependencies {
     // testImplementation project(':plugins:dataformat-csv')
 }
 
-// Task to build the Rust JNI library
-task buildRustLibrary(type: Exec) {
-    description = 'Build the Rust JNI library using Cargo'
+// ═══════════════════════════════════════════════════════════════════
+// Native library — built by vectorized-exec-spi, copied here for packaging
+// ═══════════════════════════════════════════════════════════════════
+
+def spiProject = project(':libs:opensearch-vectorized-exec-spi')
+
+task copyNativeLibrary(type: Copy) {
+    description = 'Copy the unified native library from spi build output'
     group = 'build'
-
-    workingDir file('jni')
-
-    // Determine the target directory and library name based on OS
-    def osName = System.getProperty('os.name').toLowerCase()
-    def libPrefix = osName.contains('windows') ? '' : 'lib'
-    def libExtension = osName.contains('windows') ? '.dll' : (osName.contains('mac') ? '.dylib' : '.so')
-
-    def targetDir = "target/${buildType}"
-
-  // Find cargo executable - try common locations
-  def cargoExecutable = 'cargo'
-  def possibleCargoPaths = [
-    System.getenv('HOME') + '/.cargo/bin/cargo',
-    '/usr/local/bin/cargo',
-    'cargo'
-  ]
-
-  for (String path : possibleCargoPaths) {
-    if (new File(path).exists()) {
-      cargoExecutable = path
-      break
-    }
-  }
-
-    def cargoArgs = [cargoExecutable, 'build']
-    if (buildType == 'release') {
-        cargoArgs.add('--release')
-    }
-
-    if (osName.contains('windows')) {
-        commandLine cargoArgs
-    } else {
-        commandLine cargoArgs
-    }
-
-    // Set environment variables for cross-compilation if needed
-    environment 'CARGO_TARGET_DIR', file('jni/target').absolutePath
-
-    inputs.files fileTree('jni/src')
-    inputs.file 'jni/Cargo.toml'
-    outputs.files file("jni/${targetDir}/${libPrefix}opensearch_datafusion_jni${libExtension}")
-    System.out.println("Building Rust library in ${buildType} mode");
-}
-
-// Task to copy the native library to resources
-task copyNativeLibrary(type: Copy, dependsOn: buildRustLibrary) {
-    description = 'Copy the native library to Java resources'
-    group = 'build'
-
-    def osName = System.getProperty('os.name').toLowerCase()
-    def libPrefix = osName.contains('windows') ? '' : 'lib'
-    def libExtension = osName.contains('windows') ? '.dll' : (osName.contains('mac') ? '.dylib' : '.so')
-
-    from file("jni/target/${buildType}/${libPrefix}opensearch_datafusion_jni${libExtension}")
+    dependsOn spiProject.tasks.named('copyNativeLibrary')
+    from spiProject.ext.nativeLibDir
     into file('src/main/resources/native')
-
-    // Rename to a standard name for Java to load
-    rename { filename ->
-        "libopensearch_datafusion_jni${libExtension}"
-    }
-
-    // Remove executable permissions to comply with OpenSearch file permission checks
-    filePermissions {
-        unix(0644)
-    }
+    filePermissions { unix(0644) }
 }
 
 // Exclude jars provided by analytics-engine plugin (shared via extendedPlugins classloader)
@@ -171,6 +114,7 @@ bundlePlugin {
     exclude 'jackson-databind-*.jar'
     exclude 'jackson-core-*.jar'
     exclude 'commons-codec-*.jar'
+    exclude 'commons-io-*.jar'
     exclude 'janino-*.jar'
     exclude 'commons-compiler-*.jar'
     exclude 'joou-java-6-*.jar'

@@ -14,6 +14,11 @@
 4. Run opensearch with following parameters
 ```
  ./gradlew run --preserve-data -PremotePlugins="['org.opensearch.plugin:opensearch-job-scheduler:3.3.0.0', 'org.opensearch.plugin:opensearch-sql-plugin:3.3.0.0']" -PinstalledPlugins="['engine-datafusion']" -Dbuild.snapshot=false --debug-jvm
+
+If hitting analytics plugin related errors run :
+
+ ./gradlew run --preserve-data -PremotePlugins="['org.opensearch.plugin:opensearch-job-scheduler:3.3.0.0', 'org.opensearch.plugin:opensearch-sql-plugin:3.3.0.0']" -PinstalledPlugins="['analytics-engine', 'engine-datafusion']" -Dbuild.snapshot=false
+
 ```
 
 

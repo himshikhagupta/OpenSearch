@@ -274,83 +274,40 @@ tasks.register('runNativeUnitTests', Exec) {
 }
 
 // updateVersion: Task to auto update version to the next development iteration
-tasks.register('buildRust', Exec) {
-//  workingDir = file("${projectDir}/src/main/rust")
-//  commandLine = ['cargo', 'build', '--release']
+// ═══════════════════════════════════════════════════════════════════
+// Native library — built by vectorized-exec-spi, copied here for packaging
+// ═══════════════════════════════════════════════════════════════════
 
-  description = 'Build the Rust JNI library using Cargo'
-  group = 'build'
+def spiProject = project(':libs:opensearch-vectorized-exec-spi')
 
-  workingDir = file("${projectDir}/src/main/rust")
-
-  def osName = System.getProperty('os.name').toLowerCase()
-  def libPrefix = osName.contains('windows') ? '' : 'lib'
-  def libExtension = osName.contains('windows') ? '.dll' : (osName.contains('mac') ? '.dylib' : '.so')
-  def libName = 'parquet_dataformat_jni'
-
-  // Find cargo executable
-  def cargoExecutable = 'cargo'
-  def possibleCargoPaths = [
-          System.getenv('HOME') + '/.cargo/bin/cargo',
-          '/usr/local/bin/cargo',
-          'cargo'
-  ]
-
-  for (String path : possibleCargoPaths) {
-    if (new File(path).exists()) {
-      cargoExecutable = path
-      break
-    }
-  }
-
-  def cargoArgs = [cargoExecutable, 'build']
-  if (buildType == 'release') {
-    cargoArgs.add('--release')
-  }
-
-  commandLine cargoArgs
-
-  inputs.files fileTree("${workingDir}/src")
-  inputs.file "${workingDir}/Cargo.toml"
-
-  def outputDir = file("${workingDir}/target/${buildType}")
-  outputs.file file("${outputDir}/${libPrefix}${libName}${libExtension}")
-  System.out.println("Building Parquet plugin rust library in ${buildType} mode");
-
+tasks.register('buildRust') {
+  dependsOn spiProject.tasks.named('buildRustLibrary')
 }
 
 tasks.register('copyNativeLib', Copy) {
-  dependsOn buildRust
-  from "src/main/rust/target/${buildType}"
+  dependsOn spiProject.tasks.named('copyNativeLibrary')
+  from spiProject.ext.nativeLibDir
   into "src/main/resources/native"
-  include "libparquet_dataformat_jni.*"
-  include "parquet_dataformat_jni.dll"
-
-  // Set strategy to avoid errors on duplicate files
   duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
   eachFile { file ->
     def os = System.getProperty('os.name').toLowerCase()
     def arch = System.getProperty('os.arch').toLowerCase()
-
     def osDir = os.contains('win') ? 'windows' : os.contains('mac') ? 'macos' : 'linux'
     def archDir = arch.contains('aarch64') || arch.contains('arm64') ? 'aarch64' :
       arch.contains('64') ? 'x86_64' : 'x86'
-
     file.path = "${osDir}-${archDir}/${file.name}"
   }
 
   doLast {
     fileTree(destinationDir).visit { FileVisitDetails fvd ->
       if (!fvd.isDirectory()) {
-        def file = fvd.file
         if (!org.gradle.internal.os.OperatingSystem.current().isWindows()) {
-          file.setExecutable(false, false)
+          fvd.file.setExecutable(false, false)
         }
       }
     }
   }
-
 }
 
 // Enhanced clean task to remove native build artifacts

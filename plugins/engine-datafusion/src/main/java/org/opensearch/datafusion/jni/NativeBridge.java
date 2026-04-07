@@ -69,10 +69,6 @@ public final class NativeBridge {
     public static native long createDatafusionReader(String path, String[] files);
     public static native void closeDatafusionReader(long ptr);
 
-    // Memory monitoring
-    public static native void printMemoryPoolAllocation(long runtimePtr);
-
-
     // Logger initialization
     public static native void initLogger();
 

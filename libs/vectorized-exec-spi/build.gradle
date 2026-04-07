@@ -28,6 +28,80 @@ tasks.named('forbiddenApisMain').configure {
 
 jarHell.enabled = false
 
+// ═══════════════════════════════════════════════════════════════════
+// Unified Rust native library build
+// ═══════════════════════════════════════════════════════════════════
+// Builds the single .so from the Cargo workspace. Both engine-datafusion
+// and parquet-data-format depend on this output.
+
+def osName = System.getProperty('os.name').toLowerCase()
+def libPrefix = osName.contains('windows') ? '' : 'lib'
+def libExtension = osName.contains('windows') ? '.dll' : (osName.contains('mac') ? '.dylib' : '.so')
+def nativeLibName = "opensearch_native_jni"
+def buildType = project.hasProperty('rustDebug') ? 'debug' : 'release'
+def rustWorkspaceDir = file("${projectDir}/rust")
+def nativeOutputDir = file("${projectDir}/build/native")
+def nativeLibFile = file("${nativeOutputDir}/${libPrefix}${nativeLibName}${libExtension}")
+
+task buildRustLibrary(type: Exec) {
+  description = 'Build the unified Rust native library from the Cargo workspace'
+  group = 'build'
+  workingDir rustWorkspaceDir
+
+  def cargoExecutable = 'cargo'
+  def possibleCargoPaths = [
+    System.getenv('HOME') + '/.cargo/bin/cargo',
+    '/usr/local/bin/cargo',
+    'cargo'
+  ]
+  for (String path : possibleCargoPaths) {
+    if (new File(path).exists()) { cargoExecutable = path; break }
+  }
+
+  def cargoArgs = [cargoExecutable, 'build', '-p', 'opensearch-native-jni']
+  if (buildType == 'release') { cargoArgs.add('--release') }
+  commandLine cargoArgs
+
+  inputs.files fileTree("${rustWorkspaceDir}/spi/src")
+  inputs.files fileTree("${rustWorkspaceDir}/engine-datafusion/src")
+  inputs.files fileTree("${rustWorkspaceDir}/parquet-format/src")
+  inputs.files fileTree("${rustWorkspaceDir}/jni-entry/src")
+  inputs.file "${rustWorkspaceDir}/Cargo.toml"
+  outputs.file file("${rustWorkspaceDir}/target/${buildType}/${libPrefix}${nativeLibName}${libExtension}")
+}
+
+task copyNativeLibrary(type: Copy, dependsOn: buildRustLibrary) {
+  description = 'Copy the unified native library to build/native and resources'
+  group = 'build'
+  from file("${rustWorkspaceDir}/target/${buildType}/${libPrefix}${nativeLibName}${libExtension}")
+  into nativeOutputDir
+  filePermissions { unix(0644) }
+}
+
+// Also copy into spi's resources so NativeLibraryLoader can find it via getResourceAsStream
+task copyNativeToResources(type: Copy, dependsOn: buildRustLibrary) {
+  def arch = System.getProperty('os.arch').toLowerCase()
+  def archDir = (arch.contains('aarch64') || arch.contains('arm64')) ? 'aarch64' : 'x86_64'
+  def osDir = osName.contains('mac') ? 'macos' : osName.contains('win') ? 'windows' : 'linux'
+  def platformDir = "${osDir}-${archDir}"
+
+  from file("${rustWorkspaceDir}/target/${buildType}/${libPrefix}${nativeLibName}${libExtension}")
+  into file("src/main/resources/native/${platformDir}")
+  filePermissions { unix(0644) }
+}
+
+processResources.dependsOn copyNativeToResources
+
+// Expose the native lib location as a project property so plugins can reference it
+ext.nativeLibDir = nativeOutputDir
+ext.nativeLibPath = nativeLibFile
+
 test {
   systemProperty 'tests.security.manager', 'false'
+  systemProperty 'native.lib.path', nativeLibFile.absolutePath
+  dependsOn copyNativeLibrary
+
+  doFirst {
+    delete fileTree(dir: "${buildDir}/distributions", include: '*.jar')
+  }
 }
