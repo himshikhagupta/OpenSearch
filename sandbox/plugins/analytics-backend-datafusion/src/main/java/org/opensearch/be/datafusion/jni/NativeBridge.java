@@ -37,7 +37,7 @@ public final class NativeBridge {
     public static void executeQueryPhaseAsync(long readerPtr, String tableName, byte[] plan,
             boolean isQueryPlanExplainEnabled, int partitionCount, long runtimePtr, ActionListener<Long> listener) {
         org.opensearch.datafusion.jni.NativeBridge.executeQueryPhaseAsync(
-            readerPtr, tableName, plan, isQueryPlanExplainEnabled, partitionCount, runtimePtr, listener);
+            readerPtr, tableName, plan, isQueryPlanExplainEnabled, partitionCount, runtimePtr, 0L, listener);
     }
 
     public static void streamNext(long runtime, long stream, ActionListener<Long> listener) {
@@ -49,6 +49,6 @@ public final class NativeBridge {
     }
 
     public static void streamClose(long stream) {
-        org.opensearch.datafusion.jni.NativeBridge.streamClose(stream);
+        org.opensearch.datafusion.jni.NativeBridge.streamClose(stream, 0L);
     }
 }
