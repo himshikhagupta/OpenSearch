@@ -50,7 +50,8 @@ log = "0.4"
 tracing = "0.1.41"
 
 # Allocator
-mimalloc = { version = "0.1.48", default-features = false }
+mimalloc = { version = "0.1.48", default-features = false, features = ["v3"] }
+libmimalloc-sys = { version = "0.1.44", features = ["extended", "v3"] }
 
 # Misc
 dashmap = "5.5"

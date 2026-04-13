@@ -11,5 +11,6 @@
 //! This crate provides common functionality that can be shared between
 //! parquet-data-format and engine-datafusion modules.
 
+pub mod heap_allocator;
 pub mod logger;
 pub mod native_registry;

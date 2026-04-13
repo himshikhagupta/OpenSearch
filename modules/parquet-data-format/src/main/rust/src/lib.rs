@@ -12,7 +12,10 @@ use lazy_static::lazy_static;
 use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
 use std::fs::File;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+// Per-plugin heap for memory tracking
+static PLUGIN_HEAP: OnceLock<vectorized_exec_spi::heap_allocator::PluginHeap> = OnceLock::new();
 use parquet::file::metadata::FileMetaData as FileFileMetaData;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 
@@ -586,8 +589,12 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_init
     env: JNIEnv,
     _class: JClass,
 ) {
-    // Initialize the logger using the shared crate
     vectorized_exec_spi::logger::init_logger_from_env(&env);
+    let heap = *PLUGIN_HEAP.get_or_init(|| {
+        vectorized_exec_spi::heap_allocator::create_heap("parquet-format")
+    });
+    // Set the JNI calling thread's heap so write/merge allocations are tracked
+    vectorized_exec_spi::heap_allocator::set_thread_heap(heap);
 }
 
 /// JNI entry point for createWriter.

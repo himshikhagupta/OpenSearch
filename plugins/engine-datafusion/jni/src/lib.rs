@@ -102,6 +102,9 @@ static STREAM_NEXT_MONITOR: Lazy<TaskMonitor> = Lazy::new(|| {
 // Global runtime manager
 static TOKIO_RUNTIME_MANAGER: OnceLock<Arc<RuntimeManager>> = OnceLock::new();
 
+// Per-plugin heap for memory tracking
+static PLUGIN_HEAP: OnceLock<vectorized_exec_spi::heap_allocator::PluginHeap> = OnceLock::new();
+
 // Global JavaVM reference
 static JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
 
@@ -189,10 +192,10 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_initLogge
     env: JNIEnv,
     _class: JClass,
 ) {
-    // Initialize the logger with the JVM for Rust->Java logging bridge
-    // This uses the shared logger from vectorized_exec_spi
-    // The logger stores its own JVM reference internally
     vectorized_exec_spi::logger::init_logger_from_env(&env);
+    PLUGIN_HEAP.get_or_init(|| {
+        vectorized_exec_spi::heap_allocator::create_heap("engine-datafusion")
+    });
 }
 
 #[no_mangle]
@@ -208,8 +211,9 @@ pub extern "system" fn Java_org_opensearch_datafusion_jni_NativeBridge_initTokio
     });
 
     TOKIO_RUNTIME_MANAGER.get_or_init(|| {
+        let heap = *PLUGIN_HEAP.get().expect("Plugin heap not registered — call initLogger first");
         log_info!("Runtime manager initialized with {} CPU threads", cpu_threads);
-        Arc::new(RuntimeManager::new(cpu_threads as usize))
+        Arc::new(RuntimeManager::new(cpu_threads as usize, heap))
     });
 }
 

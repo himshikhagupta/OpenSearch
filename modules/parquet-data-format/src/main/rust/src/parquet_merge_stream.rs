@@ -130,6 +130,11 @@ fn get_merge_pool() -> &'static ThreadPool {
         rayon::ThreadPoolBuilder::new()
             .num_threads(RAYON_NUM_THREADS)
             .thread_name(|idx| format!("parquet-merge-{}", idx))
+            .start_handler(|_idx| {
+                if let Some(&heap) = crate::PLUGIN_HEAP.get() {
+                    vectorized_exec_spi::heap_allocator::set_thread_heap(heap);
+                }
+            })
             .build()
             .expect("Failed to build parquet-merge Rayon thread pool")
     })
@@ -150,6 +155,11 @@ fn get_io_runtime() -> &'static Runtime {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .thread_name("parquet-io")
+            .on_thread_start(|| {
+                if let Some(&heap) = crate::PLUGIN_HEAP.get() {
+                    vectorized_exec_spi::heap_allocator::set_thread_heap(heap);
+                }
+            })
             .enable_all()
             .build()
             .expect("Failed to build tokio IO runtime")

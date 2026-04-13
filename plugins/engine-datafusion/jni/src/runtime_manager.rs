@@ -82,22 +82,26 @@ pub struct RuntimeManager {
 }
 
 impl RuntimeManager {
-    pub fn new(cpu_threads: usize) -> Self {
+    pub fn new(cpu_threads: usize, plugin_heap: vectorized_exec_spi::heap_allocator::PluginHeap) -> Self {
         Self::with_config(RuntimeConfig::new()
             .with_cpu_threads(cpu_threads)
             .with_io_threads(cpu_threads)
             .with_cpu_multiplier(1.0)
-            .with_io_multiplier(2.0)
+            .with_io_multiplier(2.0),
+            plugin_heap,
         )
     }
 
-    pub fn with_config(config: RuntimeConfig) -> Self {
+    pub fn with_config(config: RuntimeConfig, plugin_heap: vectorized_exec_spi::heap_allocator::PluginHeap) -> Self {
         log_info!("Creating RuntimeManager with config: {:?}", config);
 
         // IO Runtime — build first so we can extract a Handle for sharing
         let io_runtime_rt = Builder::new_multi_thread()
             .worker_threads(config.effective_io_threads())
             .thread_name("datafusion-io")
+            .on_thread_start(move || {
+                vectorized_exec_spi::heap_allocator::set_thread_heap(plugin_heap);
+            })
             .enable_all()
             .build()
             .expect("Failed to create IO runtime");
@@ -116,6 +120,7 @@ impl RuntimeManager {
             .thread_name("datafusion-cpu")
             .enable_all()
             .on_thread_start(move || {
+                vectorized_exec_spi::heap_allocator::set_thread_heap(plugin_heap);
                 // Register IO runtime for each CPU thread
                 register_io_runtime(Some(io_handle_for_cpu.clone()));
             });

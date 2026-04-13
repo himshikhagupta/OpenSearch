@@ -12,3 +12,5 @@ crate-type = ["rlib"]
 jni = { workspace = true }
 linkme = "0.3"
 libc = "0.2"
+libmimalloc-sys = { workspace = true }
+log = { workspace = true }
