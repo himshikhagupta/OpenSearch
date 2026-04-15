@@ -146,7 +146,7 @@ public class DefaultQueryPlannerResolveTests extends OpenSearchTestCase {
         var input = buildScan();
         var rexBuilder = cluster.getRexBuilder();
         var condition = rexBuilder.makeLiteral(true);
-        var predicates = java.util.Map.of("lucene", condition, "datafusion", condition);
+        var predicates = java.util.Map.<String, org.apache.calcite.rex.RexNode>of("lucene", condition, "datafusion", condition);
 
         var hybridFilter = new org.opensearch.analytics.plan.operators.OpenSearchHybridFilter(
             cluster2, cluster2.traitSet(), input, condition, "lucene", predicates);

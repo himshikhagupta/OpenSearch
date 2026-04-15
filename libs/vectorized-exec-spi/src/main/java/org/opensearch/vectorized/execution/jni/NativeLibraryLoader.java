@@ -115,4 +115,28 @@ public final class NativeLibraryLoader {
      * the Rust function pointers in the .so.
      */
     private static native void registerClassNative(Class<?> clazz);
+
+    /**
+     * Returns per-plugin native heap stats as a JSON string.
+     * Format: [{"name":"plugin-name","used":12345,"committed":65536}, ...]
+     * @return JSON array of per-plugin heap stats, or "[]" if no plugins registered
+     */
+    public static String getHeapStats() {
+        ensureLoaded();
+        return getHeapStatsNative();
+    }
+
+    private static native String getHeapStatsNative();
+
+    /**
+     * Returns global mimalloc process-level memory stats as a JSON string.
+     * Format: {"current_rss":N,"peak_rss":N,"current_commit":N,"peak_commit":N}
+     * @return JSON object with global mimalloc stats
+     */
+    public static String getGlobalMimallocStats() {
+        ensureLoaded();
+        return getGlobalMimallocStatsNative();
+    }
+
+    private static native String getGlobalMimallocStatsNative();
 }

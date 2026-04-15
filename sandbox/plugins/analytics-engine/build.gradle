@@ -48,6 +48,9 @@ dependencies {
 
   testImplementation project(':plugins:engine-datafusion')
   testImplementation project(':sandbox:plugins:test-ppl-frontend')
+  testImplementation project(':libs:opensearch-vectorized-exec-spi')
+  testImplementation project(':modules:parquet-data-format')
+
 
   // Guava for test compilation — Calcite API exposes guava types
   calciteTestCompile "com.google.guava:guava:${versions.guava}"
@@ -78,6 +81,7 @@ configurations.all {
     force 'com.google.guava:failureaccess:1.0.2'
     force 'com.google.errorprone:error_prone_annotations:2.36.0'
     force 'org.checkerframework:checker-qual:3.43.0'
+    force 'commons-io:commons-io:2.16.0'
     force "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
     force "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
     force "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson}"
@@ -106,3 +110,12 @@ configurations.all {
   }
 }
 
+
+// Ensure the native .so is built and on the classpath for integration tests
+def spiProject = project(':libs:opensearch-vectorized-exec-spi')
+tasks.matching { it.name == 'internalClusterTest' }.configureEach {
+    dependsOn spiProject.tasks.named('copyNativeToResources')
+    systemProperty 'java.library.path', spiProject.ext.nativeLibDir.absolutePath
+    systemProperty 'tests.security.manager', 'false'
+    jvmArgs += ['--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED']
+}

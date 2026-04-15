@@ -126,3 +126,47 @@ pub extern "system" fn Java_org_opensearch_vectorized_execution_jni_NativeLibrar
         let _ = env.throw_new("java/lang/RuntimeException", &e);
     }
 }
+
+/// Returns per-plugin heap stats as a JSON string.
+/// Format: [{"name":"plugin-name","used":12345,"committed":65536}, ...]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_opensearch_vectorized_execution_jni_NativeLibraryLoader_getHeapStatsNative<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass<'a>,
+) -> jni::sys::jstring {
+    use vectorized_exec_spi::heap_allocator::all_plugin_stats;
+    let stats = all_plugin_stats();
+    let mut json = String::from("[");
+    for (i, ps) in stats.iter().enumerate() {
+        if i > 0 { json.push(','); }
+        json.push_str(&format!(
+            "{{\"name\":\"{}\",\"used\":{},\"committed\":{}}}",
+            ps.name, ps.stats.used, ps.stats.committed
+        ));
+    }
+    json.push(']');
+    match env.new_string(&json) {
+        Ok(s) => s.into_raw(),
+        Err(e) => {
+            let _ = env.throw_new("java/lang/RuntimeException", format!("{}", e));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Returns global mimalloc stats (aggregated over all heaps) as JSON.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_opensearch_vectorized_execution_jni_NativeLibraryLoader_getGlobalMimallocStatsNative<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass<'a>,
+) -> jni::sys::jstring {
+    use vectorized_exec_spi::heap_allocator::global_mimalloc_stats_json;
+    let json = global_mimalloc_stats_json();
+    match env.new_string(&json) {
+        Ok(s) => s.into_raw(),
+        Err(e) => {
+            let _ = env.throw_new("java/lang/RuntimeException", format!("{}", e));
+            std::ptr::null_mut()
+        }
+    }
+}

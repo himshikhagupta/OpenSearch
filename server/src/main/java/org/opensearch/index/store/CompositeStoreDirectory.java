@@ -69,8 +69,10 @@ public class CompositeStoreDirectory extends Store.StoreDirectory {
             pluginsService.filterPlugins(DataSourcePlugin.class).forEach(plugin -> {
                 try {
                     FormatStoreDirectory<?> formatDir = plugin.createFormatStoreDirectory(indexSettings, shardPath);
-                    delegates.add(formatDir);
-                    delegatesMap.put(plugin.getDataFormat().name(), formatDir);
+                    if (formatDir != null) {
+                        delegates.add(formatDir);
+                        delegatesMap.put(plugin.getDataFormat().name(), formatDir);
+                    }
                 } catch (IOException e) {
                     logger.error("Failed to create FormatStoreDirectory for format: {}", plugin.getDataFormat().name(), e);
                     throw new RuntimeException("Failed to create format directory for " + plugin.getDataFormat().name(), e);

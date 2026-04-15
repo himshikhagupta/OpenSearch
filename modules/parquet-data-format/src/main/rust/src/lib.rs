@@ -16,6 +16,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 // Per-plugin heap for memory tracking
 static PLUGIN_HEAP: OnceLock<vectorized_exec_spi::heap_allocator::PluginHeap> = OnceLock::new();
+
+/// Temporarily set the parquet plugin heap for the duration of a JNI call.
+/// Returns a guard that restores the previous heap on drop.
+fn scoped_plugin_heap() -> Option<vectorized_exec_spi::heap_allocator::HeapGuard> {
+    PLUGIN_HEAP.get().map(|&heap| {
+        vectorized_exec_spi::heap_allocator::scoped_thread_heap(heap)
+    })
+}
 use parquet::file::metadata::FileMetaData as FileFileMetaData;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 
@@ -590,11 +598,9 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_init
     _class: JClass,
 ) {
     vectorized_exec_spi::logger::init_logger_from_env(&env);
-    let heap = *PLUGIN_HEAP.get_or_init(|| {
+    PLUGIN_HEAP.get_or_init(|| {
         vectorized_exec_spi::heap_allocator::create_heap("parquet-format")
     });
-    // Set the JNI calling thread's heap so write/merge allocations are tracked
-    vectorized_exec_spi::heap_allocator::set_thread_heap(heap);
 }
 
 /// JNI entry point for createWriter.
@@ -609,6 +615,7 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_crea
     sort_column: JString,
     reverse_sort: jboolean,
 ) {
+    let _heap_guard = scoped_plugin_heap();
     let filename: String = env.get_string(&file).expect("Couldn't get file string!").into();
     let index_name: String = env.get_string(&index_name).expect("Couldn't get index_name string!").into();
 
@@ -640,6 +647,7 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_onSe
     _class: JClass,
     settings: JObject
 ) {
+    let _heap_guard = scoped_plugin_heap();
     match read_native_settings(&mut env, &settings) {
         Ok(config) => {
             let index_name = match &config.index_name {
@@ -676,6 +684,7 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_remo
     _class: JClass,
     index_name: JString
 ) {
+    let _heap_guard = scoped_plugin_heap();
     match env.get_string(&index_name) {
         Ok(name) => {
             let name: String = name.into();
@@ -745,6 +754,7 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_writ
     array_address: jlong,
     schema_address: jlong
 ) -> jint {
+    let _heap_guard = scoped_plugin_heap();
     let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
     match NativeParquetWriter::write_data(filename, array_address as i64, schema_address as i64) {
         Ok(_) => 0,
@@ -758,6 +768,7 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_clos
     _class: JClass,
     file: JString
 ) -> jobject {
+    let _heap_guard = scoped_plugin_heap();
     let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
     match NativeParquetWriter::close_writer(filename) {
         Ok(maybe_metadata) => {
@@ -796,6 +807,7 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_flus
     _class: JClass,
     file: JString
 ) -> jint {
+    let _heap_guard = scoped_plugin_heap();
     let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
     match NativeParquetWriter::flush_to_disk(filename) {
         Ok(_) => 0,
@@ -809,6 +821,7 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_getF
     _class: JClass,
     file: JString
 ) -> jobject {
+    let _heap_guard = scoped_plugin_heap();
     let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
     match NativeParquetWriter::get_file_metadata(filename) {
         Ok(metadata) => {
@@ -841,6 +854,7 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_getF
     _class: JClass,
     path_prefix: JString
 ) -> jlong {
+    let _heap_guard = scoped_plugin_heap();
     let prefix: String = env.get_string(&path_prefix).expect("Couldn't get java string!").into();
     match NativeParquetWriter::get_filtered_writer_memory_usage(prefix) {
         Ok(memory) => memory as jlong,
@@ -1485,6 +1499,7 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_allo
     _class: jni::objects::JClass,
     size: jni::sys::jlong,
 ) -> jni::sys::jlong {
+    let _heap_guard = scoped_plugin_heap();
     let buf: Vec<u8> = vec![42u8; size as usize];
     let ptr = Box::into_raw(buf.into_boxed_slice()) as *mut u8;
     ptr as jni::sys::jlong
