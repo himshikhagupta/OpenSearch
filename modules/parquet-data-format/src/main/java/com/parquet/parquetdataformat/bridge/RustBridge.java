@@ -44,4 +44,7 @@ public class RustBridge {
 
     // Native method declarations - these will be implemented in the JNI library
     public static native void mergeParquetFilesInRust(List<Path> inputFiles, String outputFile, String indexName, String sortKey, boolean isReverse);
+
+    /** Test-only: allocate a buffer on parquet's heap, return pointer as long. */
+    public static native long allocateTestBuffer(long size);
 }

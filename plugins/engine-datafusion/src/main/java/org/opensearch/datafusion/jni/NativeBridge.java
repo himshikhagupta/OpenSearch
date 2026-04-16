@@ -109,4 +109,7 @@ public final class NativeBridge {
      * Used to verify that sliced arrays across FFI boundary are handled correctly
      **/
     public static native void createTestSlicedArray(int offset, int length, ActionListener<long[]> listener);
+
+    /** Test-only: free a buffer allocated by parquet's allocateTestBuffer on a datafusion thread. */
+    public static native void freeTestBuffer(long ptr, long size);
 }

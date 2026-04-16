@@ -265,4 +265,67 @@ mod tests {
 
         unsafe { mi_free(wrapped.0) };
     }
+
+    #[test]
+    fn test_cross_plugin_alloc_and_free() {
+        let heap_a = create_heap("test-cross-plugin-A");
+        let heap_b = create_heap("test-cross-plugin-B");
+
+        // Phase 1: Plugin A allocates
+        let ptr = unsafe { heap_alloc(heap_a, 256 * 1024) };
+        assert!(!ptr.is_null());
+
+        let a_after_alloc = heap_stats(heap_a);
+        let b_after_alloc = heap_stats(heap_b);
+        println!("After A allocs:  A used={} committed={}  B used={} committed={}",
+            a_after_alloc.used, a_after_alloc.committed, b_after_alloc.used, b_after_alloc.committed);
+        assert!(a_after_alloc.used >= 256 * 1024,
+            "A used={} should be >= 256KB after alloc", a_after_alloc.used);
+        assert_eq!(b_after_alloc.used, 0, "B should have 0 used");
+
+        // Phase 2: Plugin B uses the ptr (reads it) on its own thread
+        let ptr_addr = ptr as usize;
+        let b = heap_b;
+        thread::Builder::new()
+            .name("plugin-b-reader".into())
+            .spawn(move || {
+                set_thread_heap(b);
+                // Simulate reading the data (touch the memory)
+                let slice = unsafe { std::slice::from_raw_parts(ptr_addr as *const u8, 256 * 1024) };
+                let _ = slice.iter().sum::<u8>();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        let a_after_use = heap_stats(heap_a);
+        let b_after_use = heap_stats(heap_b);
+        println!("After B reads:   A used={} committed={}  B used={} committed={}",
+            a_after_use.used, a_after_use.committed, b_after_use.used, b_after_use.committed);
+        // A still owns the memory, B just read it
+        assert!(a_after_use.used >= 256 * 1024, "A should still own the memory");
+        assert_eq!(b_after_use.used, 0, "B should still have 0 used (only read)");
+
+        // Phase 3: Plugin B frees the ptr on its own thread
+        let ptr_addr2 = ptr as usize;
+        let b2 = heap_b;
+        thread::Builder::new()
+            .name("plugin-b-freer".into())
+            .spawn(move || {
+                set_thread_heap(b2);
+                unsafe { mi_free(ptr_addr2 as *mut c_void) };
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        let a_after_free = heap_stats(heap_a);
+        let b_after_free = heap_stats(heap_b);
+        println!("After B frees:   A used={} committed={}  B used={} committed={}",
+            a_after_free.used, a_after_free.committed, b_after_free.used, b_after_free.committed);
+
+        // B never allocated — freeing A's pointer doesn't charge B
+        assert_eq!(b_after_free.used, 0,
+            "B used={} should be 0 (freed A's memory, not its own)", b_after_free.used);
+    }
 }

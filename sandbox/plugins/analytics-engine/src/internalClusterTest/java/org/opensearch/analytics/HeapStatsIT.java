@@ -125,11 +125,56 @@ public class HeapStatsIT extends OpenSearchIntegTestCase {
         assertTrue("parquet committed should be > 0 after indexing", parquetAfter > 0);
     }
 
+    /**
+     * Cross-plugin heap isolation: parquet allocates a buffer on its heap,
+     * datafusion frees it on a datafusion thread. Verifies memory is attributed
+     * to the allocating plugin (parquet), not the freeing plugin (datafusion).
+     */
+    public void testCrossPluginHeapIsolation() {
+        // Snapshot before
+        List<Map<String, Object>> beforeStats = parseStatsJson(NativeLibraryLoader.getHeapStats());
+        long parquetBefore = getPluginUsed(beforeStats, "parquet-format");
+        long dfBefore = getPluginUsed(beforeStats, "engine-datafusion");
+        logger.info("[cross-plugin] before: parquet used={}KB  df used={}KB", parquetBefore / 1024, dfBefore / 1024);
+
+        // Parquet allocates 256KB on its heap
+        long ptr = com.parquet.parquetdataformat.bridge.RustBridge.allocateTestBuffer(256 * 1024);
+        assertTrue("allocateTestBuffer should return non-null pointer", ptr != 0);
+
+        // Snapshot after alloc
+        List<Map<String, Object>> afterAllocStats = parseStatsJson(NativeLibraryLoader.getHeapStats());
+        long parquetAfterAlloc = getPluginUsed(afterAllocStats, "parquet-format");
+        long dfAfterAlloc = getPluginUsed(afterAllocStats, "engine-datafusion");
+        logger.info("[cross-plugin] after alloc: parquet used={}KB  df used={}KB", parquetAfterAlloc / 1024, dfAfterAlloc / 1024);
+
+        assertTrue("parquet used should increase after alloc", parquetAfterAlloc > parquetBefore);
+        assertEquals("df used should not change after parquet alloc", dfBefore, dfAfterAlloc);
+
+        // Datafusion frees the buffer on a datafusion thread
+        org.opensearch.datafusion.jni.NativeBridge.freeTestBuffer(ptr, 256 * 1024);
+
+        // Snapshot after free
+        List<Map<String, Object>> afterFreeStats = parseStatsJson(NativeLibraryLoader.getHeapStats());
+        long parquetAfterFree = getPluginUsed(afterFreeStats, "parquet-format");
+        long dfAfterFree = getPluginUsed(afterFreeStats, "engine-datafusion");
+        logger.info("[cross-plugin] after free: parquet used={}KB  df used={}KB", parquetAfterFree / 1024, dfAfterFree / 1024);
+
+        // Key invariant: datafusion should not be charged for parquet's memory
+        assertEquals("df used should remain unchanged after freeing parquet's buffer", dfBefore, dfAfterFree);
+        // Parquet may or may not decrease (mimalloc deferred cross-thread free)
+        assertTrue("parquet used should not increase after free", parquetAfterFree <= parquetAfterAlloc);
+    }
+
     // ── helpers ──
 
     private long getPluginCommitted(List<Map<String, Object>> stats, String name) {
         Map<String, Object> p = findPlugin(stats, name);
         return p != null ? (Long) p.get("committed") : 0;
+    }
+
+    private long getPluginUsed(List<Map<String, Object>> stats, String name) {
+        Map<String, Object> p = findPlugin(stats, name);
+        return p != null ? (Long) p.get("used") : 0;
     }
 
     private static List<Map<String, Object>> parseStatsJson(String json) {
