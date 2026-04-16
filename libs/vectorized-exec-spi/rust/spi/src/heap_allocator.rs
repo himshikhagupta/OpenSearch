@@ -328,4 +328,91 @@ mod tests {
         assert_eq!(b_after_free.used, 0,
             "B used={} should be 0 (freed A's memory, not its own)", b_after_free.used);
     }
+
+    /// Simulates the real plugin thread model:
+    /// - Tokio IO + CPU workers with set_thread_heap (permanent)
+    /// - Rayon pool workers with set_thread_heap (permanent)
+    /// - Each worker allocates via mimalloc heap
+    /// Verifies all allocations across all threads are tracked in the plugin's heap stats.
+    ///
+    /// Note: In the real .so, #[global_allocator] = MiMalloc routes Vec/Box through
+    /// mi_malloc → thread default heap. In tests, we use mi_heap_malloc directly
+    /// since the test binary uses the system allocator.
+    #[tokio::test]
+    async fn test_tokio_and_rayon_threads_tracked() {
+        let heap = create_heap("test-tokio-rayon");
+        let alloc_size: usize = 64 * 1024;
+        let num_tokio_tasks = 4;
+        let num_rayon_tasks = 4;
+
+        // Phase 1: Tokio tasks — simulate IO/CPU workers
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .on_thread_start(move || { set_thread_heap(heap); })
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let heap_ptr_val = heap.ptr as usize;
+        let tokio_ptrs: Vec<usize> = rt.spawn(async move {
+            let mut handles = Vec::new();
+            for _ in 0..num_tokio_tasks {
+                let hp = heap_ptr_val;
+                handles.push(tokio::spawn(async move {
+                    let ptr = unsafe { mi_heap_malloc(hp as *mut mi_heap_t, alloc_size) };
+                    assert!(!ptr.is_null());
+                    ptr as usize
+                }));
+            }
+            let mut ptrs = Vec::new();
+            for h in handles { ptrs.push(h.await.unwrap()); }
+            ptrs
+        }).await.unwrap();
+
+        let after_tokio = heap_stats(heap);
+        println!("After tokio: used={}KB committed={}KB",
+            after_tokio.used / 1024, after_tokio.committed / 1024);
+        assert!(after_tokio.used >= num_tokio_tasks * alloc_size,
+            "used={} should be >= {}KB from tokio tasks",
+            after_tokio.used, num_tokio_tasks * alloc_size / 1024);
+
+        // Phase 2: Rayon pool — simulate merge workers
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .start_handler(move |_| { set_thread_heap(heap); })
+            .build()
+            .unwrap();
+
+        let rayon_ptrs: Vec<usize> = pool.install(|| {
+            use rayon::prelude::*;
+            (0..num_rayon_tasks).into_par_iter().map(|_| {
+                let ptr = unsafe { mi_heap_malloc(heap_ptr_val as *mut mi_heap_t, alloc_size) };
+                assert!(!ptr.is_null());
+                ptr as usize
+            }).collect()
+        });
+
+        let after_rayon = heap_stats(heap);
+        println!("After rayon: used={}KB committed={}KB",
+            after_rayon.used / 1024, after_rayon.committed / 1024);
+        assert!(after_rayon.used >= (num_tokio_tasks + num_rayon_tasks) * alloc_size,
+            "used={} should be >= {}KB from tokio+rayon",
+            after_rayon.used, (num_tokio_tasks + num_rayon_tasks) * alloc_size / 1024);
+
+        // Cleanup: free on a thread with the heap set
+        let all_ptrs: Vec<usize> = tokio_ptrs.into_iter().chain(rayon_ptrs).collect();
+        std::thread::Builder::new()
+            .name("cleanup".into())
+            .spawn(move || {
+                set_thread_heap(heap);
+                for addr in all_ptrs {
+                    unsafe { mi_free(addr as *mut c_void) };
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        rt.shutdown_background();
+    }
 }
