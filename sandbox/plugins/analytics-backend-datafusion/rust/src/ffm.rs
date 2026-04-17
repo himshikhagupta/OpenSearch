@@ -13,10 +13,13 @@ use std::str;
 use std::sync::Arc;
 
 use native_bridge_common::ffm_safe;
+use native_bridge_common::heap_allocator::PluginHeap;
 use parking_lot::RwLock;
 
 use crate::api;
 use crate::runtime_manager::RuntimeManager;
+
+static PLUGIN_HEAP: std::sync::OnceLock<PluginHeap> = std::sync::OnceLock::new();
 
 static TOKIO_RUNTIME_MANAGER: RwLock<Option<Arc<RuntimeManager>>> = RwLock::new(None);
 
@@ -40,8 +43,10 @@ fn get_rt_manager() -> Result<Arc<RuntimeManager>, String> {
 
 #[no_mangle]
 pub extern "C" fn df_init_runtime_manager(cpu_threads: i32) {
+    let heap = native_bridge_common::heap_allocator::create_heap("datafusion");
+    let _ = PLUGIN_HEAP.set(heap);
     let mut guard = TOKIO_RUNTIME_MANAGER.write();
-    *guard = Some(Arc::new(RuntimeManager::new(cpu_threads as usize)));
+    *guard = Some(Arc::new(RuntimeManager::new(cpu_threads as usize, heap)));
 }
 
 #[no_mangle]
@@ -163,4 +168,27 @@ pub unsafe extern "C" fn df_sql_to_substrait(
         *out_len = bytes.len() as i64;
     }
     Ok(0)
+}
+
+/// Allocate `size` bytes on the datafusion plugin heap. Returns pointer as i64.
+#[no_mangle]
+pub extern "C" fn df_allocate_test_buffer(size: i64) -> i64 {
+    if let Some(heap) = PLUGIN_HEAP.get() {
+        let _guard = native_bridge_common::heap_allocator::scoped_thread_heap(*heap);
+        let buf = vec![0u8; size as usize];
+        let ptr = buf.as_ptr() as i64;
+        std::mem::forget(buf);
+        ptr
+    } else {
+        0
+    }
+}
+
+/// Free a buffer previously allocated by `df_allocate_test_buffer`.
+#[no_mangle]
+pub unsafe extern "C" fn df_free_test_buffer(ptr: i64, size: i64) {
+    if let Some(heap) = PLUGIN_HEAP.get() {
+        let _guard = native_bridge_common::heap_allocator::scoped_thread_heap(*heap);
+        let _ = Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize);
+    }
 }

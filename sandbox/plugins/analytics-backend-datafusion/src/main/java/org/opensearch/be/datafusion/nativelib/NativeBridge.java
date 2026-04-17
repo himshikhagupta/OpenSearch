@@ -51,6 +51,8 @@ public final class NativeBridge {
     private static final MethodHandle STREAM_NEXT;
     private static final MethodHandle STREAM_CLOSE;
     private static final MethodHandle SQL_TO_SUBSTRAIT;
+    private static final MethodHandle ALLOCATE_TEST_BUFFER;
+    private static final MethodHandle FREE_TEST_BUFFER;
 
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
@@ -136,6 +138,16 @@ public final class NativeBridge {
                 ValueLayout.JAVA_LONG,
                 ValueLayout.ADDRESS
             )
+        );
+
+        ALLOCATE_TEST_BUFFER = linker.downcallHandle(
+            lib.find("df_allocate_test_buffer").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+
+        FREE_TEST_BUFFER = linker.downcallHandle(
+            lib.find("df_free_test_buffer").orElseThrow(),
+            FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
         );
     }
 
@@ -277,4 +289,22 @@ public final class NativeBridge {
     public static void cacheManagerRemoveFiles(long runtimePtr, String[] filePaths) {}
 
     public static void initLogger() {}
+
+    /** Allocate a test buffer on the datafusion heap. Returns native pointer. */
+    public static long allocateTestBuffer(long size) {
+        try {
+            return (long) ALLOCATE_TEST_BUFFER.invokeExact(size);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    /** Free a test buffer allocated by {@link #allocateTestBuffer}. */
+    public static void freeTestBuffer(long ptr, long size) {
+        try {
+            FREE_TEST_BUFFER.invokeExact(ptr, size);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
 }
