@@ -49,6 +49,7 @@ pub fn global_mimalloc_stats_json() -> String {
 
 static REGISTRY: Mutex<Vec<(&'static str, PluginHeap)>> = Mutex::new(Vec::new());
 static MONITOR_STARTED: Once = Once::new();
+static MONITOR_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Thread-safe wrapper around a mimalloc heap pointer.
 /// Safe to send/share across threads in mimalloc v3.
@@ -71,13 +72,15 @@ pub fn create_heap(name: &'static str) -> PluginHeap {
     MONITOR_STARTED.call_once(|| {
         thread::Builder::new()
             .name("heap-monitor".into())
-            .spawn(|| loop {
-                thread::sleep(Duration::from_secs(1));
-                for ps in all_plugin_stats() {
-                    crate::log_info!(
-                        "[heap-monitor] plugin='{}' used={}KB committed={}KB",
-                        ps.name, ps.stats.used / 1024, ps.stats.committed / 1024
-                    );
+            .spawn(|| {
+                while MONITOR_RUNNING.load(std::sync::atomic::Ordering::Relaxed) {
+                    thread::sleep(Duration::from_secs(1));
+                    for ps in all_plugin_stats() {
+                        crate::log_info!(
+                            "[heap-monitor] plugin='{}' used={}KB committed={}KB",
+                            ps.name, ps.stats.used / 1024, ps.stats.committed / 1024
+                        );
+                    }
                 }
             })
             .expect("Failed to spawn heap-monitor thread");
@@ -89,6 +92,11 @@ pub fn create_heap(name: &'static str) -> PluginHeap {
 /// Use only on threads you own (e.g. Tokio worker threads via on_thread_start).
 pub fn set_thread_heap(heap: PluginHeap) {
     unsafe { mi_heap_set_default(heap.ptr) };
+}
+
+/// Stop the background heap-monitor thread.
+pub fn stop_monitor() {
+    MONITOR_RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Temporarily set the current thread's default mimalloc heap.
@@ -345,6 +353,11 @@ mod tests {
         let num_tokio_tasks = 4;
         let num_rayon_tasks = 4;
 
+        // Baseline: capture heap usage before any allocations
+        let baseline = heap_stats(heap);
+        println!("Baseline: used={}KB committed={}KB",
+            baseline.used / 1024, baseline.committed / 1024);
+
         // Phase 1: Tokio tasks — simulate IO/CPU workers
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -370,11 +383,14 @@ mod tests {
         }).await.unwrap();
 
         let after_tokio = heap_stats(heap);
-        println!("After tokio: used={}KB committed={}KB",
-            after_tokio.used / 1024, after_tokio.committed / 1024);
-        assert!(after_tokio.used >= num_tokio_tasks * alloc_size,
-            "used={} should be >= {}KB from tokio tasks",
-            after_tokio.used, num_tokio_tasks * alloc_size / 1024);
+        let tokio_delta = after_tokio.used - baseline.used;
+        println!("After tokio: used={}KB (delta={}KB)",
+            after_tokio.used / 1024, tokio_delta / 1024);
+        let tokio_expected = num_tokio_tasks * alloc_size;
+        let margin = tokio_expected / 10; // 10% buffer
+        assert!(tokio_delta >= tokio_expected && tokio_delta <= tokio_expected + margin,
+            "tokio delta={} should be between {} and {} from {} tokio tasks",
+            tokio_delta, tokio_expected, tokio_expected + margin, num_tokio_tasks);
 
         // Phase 2: Rayon pool — simulate merge workers
         let pool = rayon::ThreadPoolBuilder::new()
@@ -382,6 +398,12 @@ mod tests {
             .start_handler(move |_| { set_thread_heap(heap); })
             .build()
             .unwrap();
+
+        // warm up threads so internal allocations settle, this memory goes to default pool since heap is not set at this point
+        pool.install(|| {}); 
+        let before_rayon = heap_stats(heap);
+        println!("Before rayon thread start: used={}KB committed={}KB",
+                 before_rayon.used / 1024, before_rayon.committed / 1024);
 
         let rayon_ptrs: Vec<usize> = pool.install(|| {
             use rayon::prelude::*;
@@ -393,11 +415,14 @@ mod tests {
         });
 
         let after_rayon = heap_stats(heap);
-        println!("After rayon: used={}KB committed={}KB",
-            after_rayon.used / 1024, after_rayon.committed / 1024);
-        assert!(after_rayon.used >= (num_tokio_tasks + num_rayon_tasks) * alloc_size,
-            "used={} should be >= {}KB from tokio+rayon",
-            after_rayon.used, (num_tokio_tasks + num_rayon_tasks) * alloc_size / 1024);
+        let rayon_delta = after_rayon.used - before_rayon.used;
+        let rayon_expected = num_rayon_tasks * alloc_size;
+        let rayon_margin = rayon_expected / 10;
+        println!("After rayon: used={}KB (rayon_delta={}KB)",
+            after_rayon.used / 1024, rayon_delta / 1024);
+        assert!(rayon_delta >= rayon_expected && rayon_delta <= rayon_expected + rayon_margin,
+            "rayon delta={} should be between {} and {} from {} rayon tasks",
+            rayon_delta, rayon_expected, rayon_expected + rayon_margin, num_rayon_tasks);
 
         // Cleanup: free on a thread with the heap set
         let all_ptrs: Vec<usize> = tokio_ptrs.into_iter().chain(rayon_ptrs).collect();
@@ -414,5 +439,8 @@ mod tests {
             .unwrap();
 
         rt.shutdown_background();
+        stop_monitor();
+        // Wait for monitor thread to wake and exit (sleeps 1s in loop)
+        std::thread::sleep(Duration::from_millis(1100));
     }
 }
