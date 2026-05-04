@@ -65,6 +65,16 @@ public final class NativeLibraryLoader {
             );
             // Register the Rust→Java log callback
             LOOKUP.find("native_logger_init").ifPresent(sym -> RustLoggerBridge.register(linker, sym));
+            // Start periodic mimalloc metrics logging (10s interval)
+            LOOKUP.find("native_mimalloc_metrics_start").ifPresent(sym -> {
+                try {
+                    linker.downcallHandle(sym, FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG))
+                        .invokeExact(10L);
+                    System.err.println("[NativeLibraryLoader] mimalloc metrics started (10s interval)");
+                } catch (Throwable t) {
+                    System.err.println("[NativeLibraryLoader] Failed to start mimalloc metrics: " + t);
+                }
+            });
         }
     }
 
