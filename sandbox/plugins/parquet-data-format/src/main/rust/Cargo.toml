@@ -22,7 +22,6 @@ parquet = { workspace = true }
 lazy_static = { workspace = true }
 dashmap = { workspace = true }
 chrono = { workspace = true }
-mimalloc = { workspace = true }
 tempfile = { workspace = true }
 native-bridge-common = { workspace = true }
 crc32fast = { workspace = true }

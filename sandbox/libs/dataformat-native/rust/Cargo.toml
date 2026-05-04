@@ -45,7 +45,8 @@ serde_json = "1.0"
 log = "0.4"
 
 # Allocator
-mimalloc = { version = "0.1.48", default-features = false }
+tikv-jemallocator = "0.6"
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 # Misc
 dashmap = "5.5"
