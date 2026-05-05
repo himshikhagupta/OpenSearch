@@ -45,7 +45,7 @@ serde_json = "1.0"
 log = "0.4"
 
 # Allocator
-tikv-jemallocator = { version = "0.6", features = ["local_dynamic_tls"] }
+tikv-jemallocator = { version = "0.6", features = ["disable_initial_exec_tls"] }
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 # Misc
