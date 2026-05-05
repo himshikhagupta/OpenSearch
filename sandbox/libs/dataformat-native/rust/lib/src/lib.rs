@@ -19,6 +19,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use tikv_jemalloc_ctl::{epoch, stats};
 
+#[export_name = "malloc_conf"]
+pub static MALLOC_CONF: &[u8] = b"dirty_decay_ms:30000,muzzy_decay_ms:30000,lg_tcache_max:16\0";
+
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
