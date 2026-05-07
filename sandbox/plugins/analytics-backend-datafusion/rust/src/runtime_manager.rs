@@ -8,6 +8,9 @@
 use crate::executor::DedicatedExecutor;
 use crate::io::register_io_runtime;
 use log::info;
+use native_bridge_common::allocator::bind_thread;
+
+use crate::ffm::PLUGIN_ID;
 use std::sync::Arc;
 use tokio::runtime::{Builder, Runtime};
 
@@ -25,6 +28,9 @@ impl RuntimeManager {
             Builder::new_multi_thread()
                 .worker_threads(io_threads)
                 .thread_name("datafusion-io")
+                .on_thread_start(|| {
+                    bind_thread(PLUGIN_ID.get().unwrap());
+                })
                 .enable_all()
                 .build()
                 .expect("Failed to create IO runtime"),
@@ -39,6 +45,7 @@ impl RuntimeManager {
             .thread_name("datafusion-cpu")
             .enable_all()
             .on_thread_start(move || {
+                bind_thread(PLUGIN_ID.get().unwrap());
                 register_io_runtime(Some(io_handle.clone()));
             });
 

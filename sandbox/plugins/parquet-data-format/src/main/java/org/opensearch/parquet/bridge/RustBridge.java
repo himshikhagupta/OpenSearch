@@ -28,9 +28,17 @@ public class RustBridge {
     private static final MethodHandle GET_FILE_METADATA;
     private static final MethodHandle GET_FILTERED_BYTES;
 
+    private static final MethodHandle INIT;
+
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
         Linker linker = Linker.nativeLinker();
+        INIT = linker.downcallHandle(lib.find("parquet_init").orElseThrow(), FunctionDescriptor.ofVoid());
+        try {
+            INIT.invokeExact();
+        } catch (Throwable t) {
+            throw new ExceptionInInitializerError(t);
+        }
         CREATE_WRITER = linker.downcallHandle(
             lib.find("parquet_create_writer").orElseThrow(),
             FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)

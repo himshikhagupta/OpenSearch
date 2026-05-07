@@ -13,10 +13,24 @@
 
 use std::slice;
 use std::str;
+use std::sync::OnceLock;
 
+use native_bridge_common::allocator::{bind_thread, register_plugin, PluginHandle};
 use native_bridge_common::ffm_safe;
 
 use crate::writer::NativeParquetWriter;
+
+pub(crate) static PLUGIN_ID: OnceLock<PluginHandle> = OnceLock::new();
+
+fn ensure_registered() -> &'static PluginHandle {
+    PLUGIN_ID.get_or_init(|| register_plugin("parquet"))
+}
+
+/// Called from Java's RustBridge static initializer to register the parquet plugin.
+#[no_mangle]
+pub extern "C" fn parquet_init() {
+    ensure_registered();
+}
 
 unsafe fn str_from_raw<'a>(ptr: *const u8, len: i64) -> Result<&'a str, String> {
     if ptr.is_null() {
@@ -29,7 +43,7 @@ unsafe fn str_from_raw<'a>(ptr: *const u8, len: i64) -> Result<&'a str, String> 
     str::from_utf8(bytes).map_err(|e| format!("invalid UTF-8: {}", e))
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_create_writer(
     file_ptr: *const u8,
@@ -42,7 +56,7 @@ pub unsafe extern "C" fn parquet_create_writer(
         .map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_write(
     file_ptr: *const u8,
@@ -57,7 +71,7 @@ pub unsafe extern "C" fn parquet_write(
 }
 
 /// Returns 0 with metadata in out-pointers, 1 if no writer found.
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_finalize_writer(
     file_ptr: *const u8,
@@ -93,7 +107,7 @@ pub unsafe extern "C" fn parquet_finalize_writer(
     }
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_sync_to_disk(
     file_ptr: *const u8,
@@ -105,7 +119,7 @@ pub unsafe extern "C" fn parquet_sync_to_disk(
         .map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_get_file_metadata(
     file_ptr: *const u8,

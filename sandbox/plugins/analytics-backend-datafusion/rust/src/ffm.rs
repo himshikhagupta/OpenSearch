@@ -11,12 +11,17 @@
 use std::slice;
 use std::str;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
+use native_bridge_common::allocator::{bind_thread, register_plugin, PluginHandle};
 use native_bridge_common::ffm_safe;
 use parking_lot::RwLock;
 
 use crate::api;
 use crate::runtime_manager::RuntimeManager;
+
+/// This plugin's registered handle. Set once in `df_init_runtime_manager`.
+pub(crate) static PLUGIN_ID: OnceLock<PluginHandle> = OnceLock::new();
 
 static TOKIO_RUNTIME_MANAGER: RwLock<Option<Arc<RuntimeManager>>> = RwLock::new(None);
 
@@ -40,19 +45,22 @@ fn get_rt_manager() -> Result<Arc<RuntimeManager>, String> {
 
 #[no_mangle]
 pub extern "C" fn df_init_runtime_manager(cpu_threads: i32) {
+    PLUGIN_ID.get_or_init(|| register_plugin("datafusion"));
+    bind_thread(PLUGIN_ID.get().unwrap());
     let mut guard = TOKIO_RUNTIME_MANAGER.write();
     *guard = Some(Arc::new(RuntimeManager::new(cpu_threads as usize)));
 }
 
 #[no_mangle]
 pub extern "C" fn df_shutdown_runtime_manager() {
+    bind_thread(PLUGIN_ID.get().unwrap());
     let mgr = TOKIO_RUNTIME_MANAGER.write().take();
     if let Some(mgr) = mgr {
         mgr.shutdown();
     }
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_create_global_runtime(
     memory_pool_limit: i64,
@@ -67,10 +75,11 @@ pub unsafe extern "C" fn df_create_global_runtime(
 
 #[no_mangle]
 pub unsafe extern "C" fn df_close_global_runtime(ptr: i64) {
+    bind_thread(PLUGIN_ID.get().unwrap());
     api::close_global_runtime(ptr);
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_create_reader(
     table_path_ptr: *const u8,
@@ -92,10 +101,11 @@ pub unsafe extern "C" fn df_create_reader(
 
 #[no_mangle]
 pub unsafe extern "C" fn df_close_reader(ptr: i64) {
+    bind_thread(PLUGIN_ID.get().unwrap());
     api::close_reader(ptr);
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_execute_query(
     shard_view_ptr: i64,
@@ -114,13 +124,13 @@ pub unsafe extern "C" fn df_execute_query(
         .map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_get_schema(stream_ptr: i64) -> i64 {
     api::stream_get_schema(stream_ptr).map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_next(stream_ptr: i64) -> i64 {
     let mgr = get_rt_manager()?;
@@ -131,10 +141,11 @@ pub unsafe extern "C" fn df_stream_next(stream_ptr: i64) -> i64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_close(stream_ptr: i64) {
+    bind_thread(PLUGIN_ID.get().unwrap());
     api::stream_close(stream_ptr);
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_sql_to_substrait(
     shard_view_ptr: i64,

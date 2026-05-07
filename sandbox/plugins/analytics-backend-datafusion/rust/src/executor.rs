@@ -17,6 +17,9 @@ use tokio::{
 };
 
 use crate::io::register_io_runtime;
+use native_bridge_common::allocator::bind_thread;
+
+use crate::ffm::PLUGIN_ID;
 // DedicatedExecutor — runs CPU-bound DataFusion work on its own tokio runtime.
 // Based on InfluxDB's executor pattern.
 // https://github.com/apache/datafusion/blob/main/datafusion-examples/examples/query_planning/thread_pools.rs
@@ -75,10 +78,14 @@ impl DedicatedExecutor {
         let thread = std::thread::Builder::new()
             .name(format!("{name} driver"))
             .spawn(move || {
+                bind_thread(PLUGIN_ID.get().unwrap());
                 register_io_runtime(io_handle.clone());
                 let mut runtime_builder = runtime_builder;
                 let runtime = runtime_builder
-                    .on_thread_start(move || register_io_runtime(io_handle.clone()))
+                    .on_thread_start(move || {
+                        bind_thread(PLUGIN_ID.get().unwrap());
+                        register_io_runtime(io_handle.clone());
+                    })
                     .build()
                     .expect("Creating tokio runtime");
 
