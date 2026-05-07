@@ -102,6 +102,16 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         let base = ptr.sub(offset);
         let plugin_id = *base;
 
+        if (plugin_id as usize) >= MAX_PLUGINS {
+            crate::log_error!(
+                "[TrackingAllocator] BAD plugin_id={} in dealloc! ptr={:?} base={:?} offset={} layout.size={} layout.align={}",
+                plugin_id, ptr, base, offset, layout.size(), layout.align()
+            );
+            // Skip counter update but still free to avoid leak
+            JEMALLOC.dealloc(base, wrapped);
+            return;
+        }
+
         LIVE_BYTES[plugin_id as usize].fetch_sub(layout.size(), Ordering::Relaxed);
         JEMALLOC.dealloc(base, wrapped);
     }
@@ -112,6 +122,20 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 
         let base = ptr.sub(offset);
         let plugin_id = *base;
+
+        if (plugin_id as usize) >= MAX_PLUGINS {
+            crate::log_error!(
+                "[TrackingAllocator] BAD plugin_id={} in realloc! ptr={:?} base={:?} offset={} layout.size={} layout.align={} new_size={}",
+                plugin_id, ptr, base, offset, layout.size(), layout.align(), new_size
+            );
+            // Fall back to alloc+copy+dealloc to avoid UB
+            let new_ptr = self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
+            if !new_ptr.is_null() {
+                std::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
+            }
+            JEMALLOC.dealloc(base, old_wrapped);
+            return new_ptr;
+        }
 
         let new_layout = match Layout::from_size_align(new_size, layout.align()) {
             Ok(l) => l,
