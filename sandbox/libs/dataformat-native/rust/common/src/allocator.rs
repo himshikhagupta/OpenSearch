@@ -8,11 +8,12 @@
 
 //! jemalloc allocator interface: memory stats, runtime tuning, and per-plugin tracking.
 //!
-//! ## Per-Plugin Memory Tracking (Approach B: Tagged Allocator)
+//! ## Per-Plugin Memory Tracking (Thread-Local Registry + Trailer)
 //!
-//! Every allocation is prefixed with a 1-byte header storing the plugin ID.
-//! On dealloc, the header is read to credit the correct plugin regardless of
-//! which thread frees the memory. This handles cross-plugin buffer transfers.
+//! Every allocation has a 1-byte trailer (appended after user data) storing the plugin ID.
+//! Each thread maintains its own `[AtomicI64; MAX_PLUGINS]` counter array — no contention.
+//! On dealloc, the trailer is read to credit the correct plugin regardless of which thread
+//! frees the memory. Reading stats sums all registered thread counters.
 //!
 //! FFI convention (same as all other native bridge functions):
 //!   - `>= 0` → success (the stat value in bytes, or 0 for setters)
@@ -21,119 +22,146 @@
 use crate::error::{ffm_wrap, into_error_ptr};
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
+use std::sync::{Mutex, OnceLock};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats, stats::allocated_mib, stats::resident_mib};
 use tikv_jemallocator::Jemalloc;
 
 // =============================================================================
-// Per-plugin tracking allocator
+// Per-plugin tracking allocator (Thread-Local Registry — Option A)
 // =============================================================================
 
 /// Maximum number of plugins that can be tracked. Plugin ID 0 = untagged (startup/system).
 pub const MAX_PLUGINS: usize = 16;
 
-/// Per-plugin live byte counters. Index 0 is "untagged" (allocations before any plugin registers).
-static LIVE_BYTES: [AtomicUsize; MAX_PLUGINS] = {
-    const ZERO: AtomicUsize = AtomicUsize::new(0);
-    [ZERO; MAX_PLUGINS]
-};
+/// Per-thread counter block. Each thread gets one, registered in THREAD_REGISTRY.
+/// Uses AtomicI64 so other threads can read (sum) without data races, but each
+/// thread only writes to its own block — no contention.
+#[repr(C)]
+struct ThreadCounterBlock {
+    deltas: [AtomicI64; MAX_PLUGINS],
+}
+
+impl ThreadCounterBlock {
+    const fn new() -> Self {
+        Self {
+            deltas: [const { AtomicI64::new(0) }; MAX_PLUGINS],
+        }
+    }
+}
+
+/// Global registry of all thread counter blocks. Locked only on thread start/exit and stats read.
+static THREAD_REGISTRY: Mutex<Vec<&'static ThreadCounterBlock>> = Mutex::new(Vec::new());
 
 thread_local! {
+    /// Each thread's private counter block. Leaked to 'static so the registry pointer stays valid.
+    static MY_COUNTERS: &'static ThreadCounterBlock = {
+        // Temporarily mark as initializing to prevent re-entrancy during Box::new
+        INITIALIZING.with(|f| f.set(true));
+        let block: &'static ThreadCounterBlock = Box::leak(Box::new(ThreadCounterBlock::new()));
+        THREAD_REGISTRY.lock().unwrap().push(block);
+        INITIALIZING.with(|f| f.set(false));
+        block
+    };
+
     /// Current plugin ID for this thread. 0 = untagged (startup, JNI callback threads, etc.)
     static CURRENT_PLUGIN: Cell<u8> = const { Cell::new(0) };
+
+    /// Re-entrancy guard: true while MY_COUNTERS is being initialized.
+    static INITIALIZING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The underlying jemalloc allocator we delegate to.
 static JEMALLOC: Jemalloc = Jemalloc;
 
-/// Layout for the 1-byte plugin ID header.
-const HEADER_LAYOUT: Layout = Layout::new::<u8>();
-
-/// Tracking allocator that wraps jemalloc with a 1-byte plugin ID header per allocation.
-/// Dealloc reads the header to credit the original allocating plugin.
+/// Tracking allocator using trailer byte + thread-local counters.
+/// Trailer: 1 byte appended after user data (no alignment padding waste).
+/// Counters: per-thread AtomicI64 arrays, zero contention on hot path.
 pub struct TrackingAllocator;
+
+/// Compute the wrapped layout: user data + 1 byte trailer, same alignment as user requested.
+#[inline(always)]
+fn trailer_layout(layout: Layout) -> Layout {
+    // Safety: size+1 won't overflow for any realistic allocation, and align is unchanged.
+    unsafe { Layout::from_size_align_unchecked(layout.size() + 1, layout.align()) }
+}
 
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let (wrapped, offset) = match HEADER_LAYOUT.extend(layout) {
-            Ok(v) => v,
-            Err(_) => return std::ptr::null_mut(),
-        };
-        let wrapped = wrapped.pad_to_align();
+        // During thread-local init, fall through to raw jemalloc (no tracking)
+        if INITIALIZING.with(|f| f.get()) {
+            return JEMALLOC.alloc(layout);
+        }
 
-        let base = JEMALLOC.alloc(wrapped);
-        if base.is_null() {
-            crate::log_error!("[TrackingAllocator] alloc failed: size={} align={}", layout.size(), layout.align());
-            return base;
+        let wrapped = trailer_layout(layout);
+        let ptr = JEMALLOC.alloc(wrapped);
+        if ptr.is_null() {
+            return ptr;
         }
 
         let plugin_id = CURRENT_PLUGIN.with(|c| c.get());
-        *base = plugin_id;
-
-        LIVE_BYTES[plugin_id as usize].fetch_add(layout.size(), Ordering::Relaxed);
-        base.add(offset)
+        *ptr.add(layout.size()) = plugin_id;
+        MY_COUNTERS.with(|c| c.deltas[plugin_id as usize].fetch_add(layout.size() as i64, Ordering::Relaxed));
+        ptr
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let (wrapped, offset) = match HEADER_LAYOUT.extend(layout) {
-            Ok(v) => v,
-            Err(_) => return std::ptr::null_mut(),
-        };
-        let wrapped = wrapped.pad_to_align();
+        if INITIALIZING.with(|f| f.get()) {
+            return JEMALLOC.alloc_zeroed(layout);
+        }
 
-        let base = JEMALLOC.alloc_zeroed(wrapped);
-        if base.is_null() {
-            crate::log_error!("[TrackingAllocator] alloc_zeroed failed: size={} align={}", layout.size(), layout.align());
-            return base;
+        let wrapped = trailer_layout(layout);
+        let ptr = JEMALLOC.alloc_zeroed(wrapped);
+        if ptr.is_null() {
+            return ptr;
         }
 
         let plugin_id = CURRENT_PLUGIN.with(|c| c.get());
-        *base = plugin_id;
-
-        LIVE_BYTES[plugin_id as usize].fetch_add(layout.size(), Ordering::Relaxed);
-        base.add(offset)
+        *ptr.add(layout.size()) = plugin_id;
+        MY_COUNTERS.with(|c| c.deltas[plugin_id as usize].fetch_add(layout.size() as i64, Ordering::Relaxed));
+        ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let (wrapped, offset) = HEADER_LAYOUT.extend(layout).unwrap_unchecked();
-        let wrapped = wrapped.pad_to_align();
-
-        let base = ptr.sub(offset);
-        let plugin_id = *base;
-
-        if (plugin_id as usize) >= MAX_PLUGINS {
-            crate::log_error!(
-                "[TrackingAllocator] BAD plugin_id={} in dealloc! ptr={:?} base={:?} offset={} layout.size={} layout.align={}",
-                plugin_id, ptr, base, offset, layout.size(), layout.align()
-            );
-            // Skip counter update but still free to avoid leak
-            JEMALLOC.dealloc(base, wrapped);
+        if INITIALIZING.with(|f| f.get()) {
+            JEMALLOC.dealloc(ptr, layout);
             return;
         }
 
-        LIVE_BYTES[plugin_id as usize].fetch_sub(layout.size(), Ordering::Relaxed);
-        JEMALLOC.dealloc(base, wrapped);
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let (old_wrapped, offset) = HEADER_LAYOUT.extend(layout).unwrap_unchecked();
-        let old_wrapped = old_wrapped.pad_to_align();
-
-        let base = ptr.sub(offset);
-        let plugin_id = *base;
+        let wrapped = trailer_layout(layout);
+        let plugin_id = *ptr.add(layout.size());
 
         if (plugin_id as usize) >= MAX_PLUGINS {
             crate::log_error!(
-                "[TrackingAllocator] BAD plugin_id={} in realloc! ptr={:?} base={:?} offset={} layout.size={} layout.align={} new_size={}",
-                plugin_id, ptr, base, offset, layout.size(), layout.align(), new_size
+                "[TrackingAllocator] BAD plugin_id={} in dealloc! ptr={:?} size={} align={}",
+                plugin_id, ptr, layout.size(), layout.align()
             );
-            // Fall back to alloc+copy+dealloc to avoid UB
+            JEMALLOC.dealloc(ptr, wrapped);
+            return;
+        }
+
+        MY_COUNTERS.with(|c| c.deltas[plugin_id as usize].fetch_sub(layout.size() as i64, Ordering::Relaxed));
+        JEMALLOC.dealloc(ptr, wrapped);
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if INITIALIZING.with(|f| f.get()) {
+            return JEMALLOC.realloc(ptr, layout, new_size);
+        }
+
+        let old_wrapped = trailer_layout(layout);
+        let plugin_id = *ptr.add(layout.size());
+
+        if (plugin_id as usize) >= MAX_PLUGINS {
+            crate::log_error!(
+                "[TrackingAllocator] BAD plugin_id={} in realloc! ptr={:?} size={} align={} new_size={}",
+                plugin_id, ptr, layout.size(), layout.align(), new_size
+            );
             let new_ptr = self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
             if !new_ptr.is_null() {
                 std::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
             }
-            JEMALLOC.dealloc(base, old_wrapped);
+            JEMALLOC.dealloc(ptr, old_wrapped);
             return new_ptr;
         }
 
@@ -141,24 +169,23 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             Ok(l) => l,
             Err(_) => return std::ptr::null_mut(),
         };
-        let (new_wrapped, new_offset) = match HEADER_LAYOUT.extend(new_layout) {
-            Ok(v) => v,
-            Err(_) => return std::ptr::null_mut(),
-        };
-        let new_wrapped = new_wrapped.pad_to_align();
+        let new_wrapped = trailer_layout(new_layout);
 
-        let new_base = JEMALLOC.realloc(base, old_wrapped, new_wrapped.size());
-        if new_base.is_null() {
-            crate::log_error!("[TrackingAllocator] realloc failed: old_size={} new_size={} align={}", layout.size(), new_size, layout.align());
-            return new_base;
+        let new_ptr = JEMALLOC.realloc(ptr, old_wrapped, new_wrapped.size());
+        if new_ptr.is_null() {
+            return new_ptr;
         }
 
-        // Header is preserved by realloc (same offset, same position)
+        // Write trailer at new position
+        *new_ptr.add(new_size) = plugin_id;
         // Update counters
-        LIVE_BYTES[plugin_id as usize].fetch_add(new_size, Ordering::Relaxed);
-        LIVE_BYTES[plugin_id as usize].fetch_sub(layout.size(), Ordering::Relaxed);
+        MY_COUNTERS.with(|c| {
+            let d = &c.deltas[plugin_id as usize];
+            d.fetch_add(new_size as i64, Ordering::Relaxed);
+            d.fetch_sub(layout.size() as i64, Ordering::Relaxed);
+        });
 
-        new_base.add(new_offset)
+        new_ptr
     }
 }
 
@@ -222,17 +249,22 @@ pub fn current_plugin_id() -> u8 {
     CURRENT_PLUGIN.with(|c| c.get())
 }
 
-/// Read live bytes for a specific plugin. Lock-free atomic load.
+/// Read live bytes for a specific plugin. Sums all thread-local counters.
 pub fn plugin_live_bytes(handle: &PluginHandle) -> usize {
-    LIVE_BYTES[handle.0 as usize].load(Ordering::Relaxed)
+    plugin_live_bytes_by_id(handle.0)
 }
 
-/// Read live bytes by raw ID (for FFI).
+/// Read live bytes by raw ID (for FFI). Sums all thread-local counters.
 pub fn plugin_live_bytes_by_id(plugin_id: u8) -> usize {
     if (plugin_id as usize) >= MAX_PLUGINS {
         return 0;
     }
-    LIVE_BYTES[plugin_id as usize].load(Ordering::Relaxed)
+    let registry = THREAD_REGISTRY.lock().unwrap();
+    let mut total: i64 = 0;
+    for block in registry.iter() {
+        total += block.deltas[plugin_id as usize].load(Ordering::Relaxed);
+    }
+    total.max(0) as usize
 }
 
 /// Get plugin name by ID (for observability/Java reporting).

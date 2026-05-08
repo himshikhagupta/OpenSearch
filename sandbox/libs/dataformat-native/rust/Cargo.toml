@@ -4,6 +4,7 @@ members = [
     "common",
     "macros",
     "lib",
+    "bench-allocator",
     "../../../plugins/analytics-backend-datafusion/rust",
     "../../../plugins/parquet-data-format/src/main/rust",
     "../../../plugins/native-repository-s3/src/main/rust",

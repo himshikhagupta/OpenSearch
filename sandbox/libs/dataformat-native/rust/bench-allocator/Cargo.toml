@@ -1,0 +1,12 @@
+[package]
+name = "bench-allocator"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bench-allocator"
+path = "src/main.rs"
+
+[dependencies]
+tikv-jemallocator = { version = "0.6", features = ["disable_initial_exec_tls"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
