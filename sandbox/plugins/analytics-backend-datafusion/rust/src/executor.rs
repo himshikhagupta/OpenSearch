@@ -75,10 +75,18 @@ impl DedicatedExecutor {
         let thread = std::thread::Builder::new()
             .name(format!("{name} driver"))
             .spawn(move || {
+                if let Some(&pid) = crate::ffm::PLUGIN_ID.get() {
+                    let _ = native_bridge_common::plugin_arena::bind_thread(pid);
+                }
                 register_io_runtime(io_handle.clone());
                 let mut runtime_builder = runtime_builder;
                 let runtime = runtime_builder
-                    .on_thread_start(move || register_io_runtime(io_handle.clone()))
+                    .on_thread_start(move || {
+                        if let Some(&pid) = crate::ffm::PLUGIN_ID.get() {
+                            let _ = native_bridge_common::plugin_arena::bind_thread(pid);
+                        }
+                        register_io_runtime(io_handle.clone());
+                    })
                     .build()
                     .expect("Creating tokio runtime");
 

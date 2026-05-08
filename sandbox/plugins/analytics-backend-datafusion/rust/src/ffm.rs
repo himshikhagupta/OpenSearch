@@ -20,6 +20,17 @@ use crate::runtime_manager::RuntimeManager;
 
 static TOKIO_RUNTIME_MANAGER: RwLock<Option<Arc<RuntimeManager>>> = RwLock::new(None);
 
+/// DataFusion plugin ID for arena-based memory tracking.
+pub(crate) static PLUGIN_ID: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+
+/// Binds the current thread to DataFusion's arena group (idempotent per thread).
+#[inline]
+fn bind_current_thread() {
+    if let Some(&pid) = PLUGIN_ID.get() {
+        let _ = native_bridge_common::plugin_arena::bind_thread(pid);
+    }
+}
+
 unsafe fn str_from_raw<'a>(ptr: *const u8, len: i64) -> Result<&'a str, String> {
     if ptr.is_null() {
         return Err("null string pointer".to_string());
@@ -40,12 +51,19 @@ fn get_rt_manager() -> Result<Arc<RuntimeManager>, String> {
 
 #[no_mangle]
 pub extern "C" fn df_init_runtime_manager(cpu_threads: i32) {
+    // Register DataFusion with ncpus arenas (one per core, minimizes contention)
+    if PLUGIN_ID.get().is_none() {
+        if let Ok(pid) = native_bridge_common::plugin_arena::register_plugin_auto() {
+            let _ = PLUGIN_ID.set(pid as u8);
+        }
+    }
     let mut guard = TOKIO_RUNTIME_MANAGER.write();
     *guard = Some(Arc::new(RuntimeManager::new(cpu_threads as usize)));
 }
 
 #[no_mangle]
 pub extern "C" fn df_shutdown_runtime_manager() {
+    bind_current_thread();
     let mgr = TOKIO_RUNTIME_MANAGER.write().take();
     if let Some(mgr) = mgr {
         mgr.shutdown();
@@ -67,6 +85,7 @@ pub unsafe extern "C" fn df_create_global_runtime(
 
 #[no_mangle]
 pub unsafe extern "C" fn df_close_global_runtime(ptr: i64) {
+    bind_current_thread();
     api::close_global_runtime(ptr);
 }
 
@@ -79,6 +98,7 @@ pub unsafe extern "C" fn df_create_reader(
     files_len_ptr: *const i64,
     files_count: i64,
 ) -> i64 {
+    bind_current_thread();
     let table_path = str_from_raw(table_path_ptr, table_path_len).map_err(|e| format!("df_create_reader: {}", e))?;
     let mut filenames = Vec::with_capacity(files_count as usize);
     for i in 0..files_count as usize {
@@ -92,6 +112,7 @@ pub unsafe extern "C" fn df_create_reader(
 
 #[no_mangle]
 pub unsafe extern "C" fn df_close_reader(ptr: i64) {
+    bind_current_thread();
     api::close_reader(ptr);
 }
 
@@ -106,6 +127,7 @@ pub unsafe extern "C" fn df_execute_query(
     runtime_ptr: i64,
     context_id: i64,
 ) -> i64 {
+    bind_current_thread();
     let mgr = get_rt_manager()?;
     let table_name = str_from_raw(table_name_ptr, table_name_len).map_err(|e| format!("df_execute_query: {}", e))?;
     let plan_bytes = slice::from_raw_parts(plan_ptr, plan_len as usize);
@@ -123,6 +145,7 @@ pub unsafe extern "C" fn df_stream_get_schema(stream_ptr: i64) -> i64 {
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_next(stream_ptr: i64) -> i64 {
+    bind_current_thread();
     let mgr = get_rt_manager()?;
     mgr.io_runtime
         .block_on(api::stream_next(stream_ptr))
@@ -131,6 +154,7 @@ pub unsafe extern "C" fn df_stream_next(stream_ptr: i64) -> i64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_close(stream_ptr: i64) {
+    bind_current_thread();
     api::stream_close(stream_ptr);
 }
 

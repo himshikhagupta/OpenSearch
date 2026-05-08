@@ -26,6 +26,11 @@ impl RuntimeManager {
                 .worker_threads(io_threads)
                 .thread_name("datafusion-io")
                 .enable_all()
+                .on_thread_start(|| {
+                    if let Some(&pid) = crate::ffm::PLUGIN_ID.get() {
+                        let _ = native_bridge_common::plugin_arena::bind_thread(pid);
+                    }
+                })
                 .build()
                 .expect("Failed to create IO runtime"),
         );
@@ -40,6 +45,9 @@ impl RuntimeManager {
             .enable_all()
             .on_thread_start(move || {
                 register_io_runtime(Some(io_handle.clone()));
+                if let Some(&pid) = crate::ffm::PLUGIN_ID.get() {
+                    let _ = native_bridge_common::plugin_arena::bind_thread(pid);
+                }
             });
 
         let cpu_executor = DedicatedExecutor::new("datafusion-cpu", cpu_runtime_builder);
