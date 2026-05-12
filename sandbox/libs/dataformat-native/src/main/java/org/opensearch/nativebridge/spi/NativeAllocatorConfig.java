@@ -31,6 +31,8 @@ public final class NativeAllocatorConfig {
 
     private static final MethodHandle SET_DIRTY;
     private static final MethodHandle SET_MUZZY;
+    private static final MethodHandle START_MONITOR;
+    private static final MethodHandle STOP_MONITOR;
 
     static {
         SymbolLookup lookup = NativeLibraryLoader.symbolLookup();
@@ -38,6 +40,11 @@ public final class NativeAllocatorConfig {
         FunctionDescriptor desc = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG);
         SET_DIRTY = linker.downcallHandle(lookup.find("native_jemalloc_set_dirty_decay_ms").orElseThrow(), desc);
         SET_MUZZY = linker.downcallHandle(lookup.find("native_jemalloc_set_muzzy_decay_ms").orElseThrow(), desc);
+        START_MONITOR = linker.downcallHandle(lookup.find("native_start_plugin_monitor").orElseThrow(), desc);
+        STOP_MONITOR = linker.downcallHandle(
+            lookup.find("native_stop_plugin_monitor").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG)
+        );
     }
 
     private NativeAllocatorConfig() {}
@@ -67,6 +74,34 @@ public final class NativeAllocatorConfig {
             logger.info("jemalloc {} updated to {}", name, ms);
         } catch (Throwable t) {
             logger.warn("Error setting jemalloc " + name, t);
+        }
+    }
+
+    /**
+     * Starts the native memory monitoring thread at the given interval.
+     *
+     * @param intervalSecs logging interval in seconds
+     */
+    public static void startMonitor(long intervalSecs) {
+        try {
+            long rc = (long) START_MONITOR.invokeExact(intervalSecs);
+            NativeLibraryLoader.checkResult(rc);
+            logger.info("Native memory monitor started (interval={}s)", intervalSecs);
+        } catch (Throwable t) {
+            logger.warn("Error starting native memory monitor", t);
+        }
+    }
+
+    /**
+     * Stops the native memory monitoring thread.
+     */
+    public static void stopMonitor() {
+        try {
+            long rc = (long) STOP_MONITOR.invokeExact();
+            NativeLibraryLoader.checkResult(rc);
+            logger.info("Native memory monitor stopped");
+        } catch (Throwable t) {
+            logger.warn("Error stopping native memory monitor", t);
         }
     }
 }

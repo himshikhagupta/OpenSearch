@@ -29,9 +29,32 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, ItemFn};
+use syn::parse::{Parse, ParseStream};
+
+/// Optional attribute: `#[ffm_safe(plugin = crate::PLUGIN_ID)]`
+/// The path must point to a `OnceLock<PluginHandle>` static.
+struct FfmSafeAttr {
+    plugin_path: Option<syn::Path>,
+}
+
+impl Parse for FfmSafeAttr {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.is_empty() {
+            return Ok(Self { plugin_path: None });
+        }
+        let ident: syn::Ident = input.parse()?;
+        if ident != "plugin" {
+            return Err(syn::Error::new(ident.span(), "expected `plugin`"));
+        }
+        let _: syn::Token![=] = input.parse()?;
+        let path: syn::Path = input.parse()?;
+        Ok(Self { plugin_path: Some(path) })
+    }
+}
 
 #[proc_macro_attribute]
-pub fn ffm_safe(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn ffm_safe(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as FfmSafeAttr);
     let input = parse_macro_input!(item as ItemFn);
     let attrs = &input.attrs;
     let vis = &input.vis;
@@ -39,9 +62,19 @@ pub fn ffm_safe(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let body = &input.block;
 
     let fn_name = input.sig.ident.to_string();
+
+    let bind_call = args.plugin_path.map(|path| {
+        quote! {
+            native_bridge_common::allocator::bind_thread(
+                #path.get().expect("plugin not registered: ensure init is called first")
+            );
+        }
+    });
+
     let expanded = quote! {
         #(#attrs)*
         #vis #sig {
+            #bind_call
             native_bridge_common::error::ffm_wrap(
                 #fn_name,
                 ::std::panic::AssertUnwindSafe(

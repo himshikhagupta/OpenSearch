@@ -27,7 +27,8 @@
 pub static MALLOC_CONF: &[u8] = b"dirty_decay_ms:30000,muzzy_decay_ms:30000,lg_tcache_max:16\0";
 
 #[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+static GLOBAL: native_bridge_common::allocator::TrackingAllocator =
+    native_bridge_common::allocator::TrackingAllocator;
 
 // Pull in plugin rlibs — forces linker to include all #[no_mangle] symbols.
 extern crate native_bridge_common;
@@ -38,3 +39,10 @@ extern crate opensearch_repository_gcs;
 extern crate opensearch_repository_azure;
 extern crate opensearch_repository_fs;
 extern crate opensearch_tiered_storage;
+
+// Force linker to include allocator FFM symbols from native-bridge-common.
+pub use native_bridge_common::allocator::{
+    native_bind_thread_to_plugin, native_jemalloc_allocated_bytes, native_jemalloc_resident_bytes,
+    native_jemalloc_set_dirty_decay_ms, native_jemalloc_set_muzzy_decay_ms,
+    native_plugin_live_bytes, native_start_plugin_monitor, native_stop_plugin_monitor,
+};

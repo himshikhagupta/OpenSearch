@@ -32,6 +32,7 @@ import java.util.Map;
  */
 public class RustBridge {
 
+    private static final MethodHandle INIT;
     private static final MethodHandle CREATE_WRITER;
     private static final MethodHandle WRITE;
     private static final MethodHandle FINALIZE_WRITER;
@@ -47,6 +48,12 @@ public class RustBridge {
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
         Linker linker = Linker.nativeLinker();
+        INIT = linker.downcallHandle(lib.find("parquet_init").orElseThrow(), FunctionDescriptor.ofVoid());
+        try {
+            INIT.invokeExact();
+        } catch (Throwable t) {
+            throw new ExceptionInInitializerError(t);
+        }
         CREATE_WRITER = linker.downcallHandle(
             lib.find("parquet_create_writer").orElseThrow(),
             FunctionDescriptor.of(

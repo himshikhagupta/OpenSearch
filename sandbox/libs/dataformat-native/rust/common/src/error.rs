@@ -34,6 +34,7 @@ where
         Ok(Ok(v)) => v,
         Ok(Err(msg)) => into_error_ptr(msg),
         Err(panic) => {
+            let bt = std::backtrace::Backtrace::force_capture();
             let msg = if let Some(s) = panic.downcast_ref::<String>() {
                 s.clone()
             } else if let Some(s) = panic.downcast_ref::<&str>() {
@@ -41,7 +42,7 @@ where
             } else {
                 format!("unknown panic in {}", name)
             };
-            into_error_ptr(msg)
+            into_error_ptr(format!("{}\n\nBacktrace:\n{}", msg, bt))
         }
     }
 }

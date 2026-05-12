@@ -13,12 +13,27 @@
 
 use std::slice;
 use std::str;
+use std::sync::OnceLock;
 
+use native_bridge_common::allocator::{bind_thread, register_plugin, PluginHandle};
 use native_bridge_common::{ffm_safe, log_debug};
 
 use crate::native_settings::NativeSettings;
 use crate::merge;
 use crate::writer::{NativeParquetWriter, SETTINGS_STORE};
+
+/// This plugin's registered handle.
+pub(crate) static PLUGIN_ID: OnceLock<PluginHandle> = OnceLock::new();
+
+fn ensure_registered() -> &'static PluginHandle {
+    PLUGIN_ID.get_or_init(|| register_plugin("parquet"))
+}
+
+/// Called from Java's RustBridge static initializer to register the parquet plugin.
+#[no_mangle]
+pub extern "C" fn parquet_init() {
+    ensure_registered();
+}
 
 unsafe fn str_from_raw<'a>(ptr: *const u8, len: i64) -> Result<&'a str, String> {
     if ptr.is_null() {
@@ -69,7 +84,7 @@ unsafe fn bool_array_from_raw(
 // Writer lifecycle
 // ---------------------------------------------------------------------------
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_create_writer(
     file_ptr: *const u8,
@@ -100,7 +115,7 @@ pub unsafe extern "C" fn parquet_create_writer(
         .map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_write(
     file_ptr: *const u8,
@@ -115,7 +130,7 @@ pub unsafe extern "C" fn parquet_write(
 }
 
 /// Returns 0 with metadata in out-pointers, 1 if no writer found.
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_finalize_writer(
     file_ptr: *const u8,
@@ -151,7 +166,7 @@ pub unsafe extern "C" fn parquet_finalize_writer(
     }
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_sync_to_disk(
     file_ptr: *const u8,
@@ -163,7 +178,7 @@ pub unsafe extern "C" fn parquet_sync_to_disk(
         .map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_get_file_metadata(
     file_ptr: *const u8,
@@ -205,7 +220,7 @@ pub unsafe extern "C" fn parquet_get_filtered_native_bytes_used(
 // ---------------------------------------------------------------------------
 
 /// Update native settings for an index. Nullable fields use sentinel -1 for "not set".
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_on_settings_update(
     index_name_ptr: *const u8,
@@ -265,7 +280,7 @@ pub unsafe extern "C" fn parquet_on_settings_update(
     Ok(0)
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_remove_settings(
     index_name_ptr: *const u8,
@@ -281,7 +296,7 @@ pub unsafe extern "C" fn parquet_remove_settings(
 // Merge
 // ---------------------------------------------------------------------------
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_merge_files(
     input_ptrs: *const *const u8,
@@ -411,7 +426,7 @@ pub unsafe extern "C" fn parquet_free_merge_result(
 /// Each row is a JSON object. The result is a JSON array of objects.
 /// The JSON bytes are written into `out_buf`, actual length into `out_len`.
 /// Returns 0 on success.
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_read_as_json(
     file_ptr: *const u8,

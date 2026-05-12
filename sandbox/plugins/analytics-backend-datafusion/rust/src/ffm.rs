@@ -11,7 +11,9 @@
 use std::slice;
 use std::str;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
+use native_bridge_common::allocator::{bind_thread, register_plugin, PluginHandle};
 use native_bridge_common::ffm_safe;
 use parking_lot::RwLock;
 
@@ -26,6 +28,9 @@ use crate::statistics_cache::CustomStatisticsCache;
 use datafusion::execution::cache::cache_unit::DefaultFilesMetadataCache;
 
 static TOKIO_RUNTIME_MANAGER: RwLock<Option<Arc<RuntimeManager>>> = RwLock::new(None);
+
+/// This plugin's registered handle. Set once in `df_init_runtime_manager`.
+pub(crate) static PLUGIN_ID: OnceLock<PluginHandle> = OnceLock::new();
 
 unsafe fn str_from_raw<'a>(ptr: *const u8, len: i64) -> Result<&'a str, String> {
     if ptr.is_null() {
@@ -47,19 +52,22 @@ fn get_rt_manager() -> Result<Arc<RuntimeManager>, String> {
 
 #[no_mangle]
 pub extern "C" fn df_init_runtime_manager(cpu_threads: i32) {
+    PLUGIN_ID.get_or_init(|| register_plugin("datafusion"));
+    bind_thread(PLUGIN_ID.get().unwrap());
     let mut guard = TOKIO_RUNTIME_MANAGER.write();
     *guard = Some(Arc::new(RuntimeManager::new(cpu_threads as usize)));
 }
 
 #[no_mangle]
 pub extern "C" fn df_shutdown_runtime_manager() {
+    bind_thread(PLUGIN_ID.get().unwrap());
     let mgr = TOKIO_RUNTIME_MANAGER.write().take();
     if let Some(mgr) = mgr {
         mgr.shutdown();
     }
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_create_global_runtime(
     memory_pool_limit: i64,
@@ -76,6 +84,7 @@ pub unsafe extern "C" fn df_create_global_runtime(
 
 #[no_mangle]
 pub unsafe extern "C" fn df_close_global_runtime(ptr: i64) {
+    bind_thread(PLUGIN_ID.get().unwrap());
     api::close_global_runtime(ptr);
 }
 
@@ -83,7 +92,7 @@ pub unsafe extern "C" fn df_close_global_runtime(ptr: i64) {
 
 /// Returns current memory pool usage in bytes.
 /// Java: MethodHandle(JAVA_LONG → JAVA_LONG)
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_get_memory_pool_usage(runtime_ptr: i64) -> i64 {
     if runtime_ptr == 0 {
@@ -94,7 +103,7 @@ pub unsafe extern "C" fn df_get_memory_pool_usage(runtime_ptr: i64) -> i64 {
 
 /// Returns current memory pool limit in bytes.
 /// Java: MethodHandle(JAVA_LONG → JAVA_LONG)
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_get_memory_pool_limit(runtime_ptr: i64) -> i64 {
     if runtime_ptr == 0 {
@@ -105,7 +114,7 @@ pub unsafe extern "C" fn df_get_memory_pool_limit(runtime_ptr: i64) -> i64 {
 
 /// Sets the memory pool limit at runtime. Takes effect for new allocations only.
 /// Java: MethodHandle(JAVA_LONG, JAVA_LONG → JAVA_LONG)
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_set_memory_pool_limit(runtime_ptr: i64, new_limit: i64) -> i64 {
     if runtime_ptr == 0 {
@@ -115,7 +124,7 @@ pub unsafe extern "C" fn df_set_memory_pool_limit(runtime_ptr: i64, new_limit: i
     Ok(0)
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_create_reader(
     table_path_ptr: *const u8,
@@ -145,7 +154,7 @@ pub unsafe extern "C" fn df_close_reader(ptr: i64) {
     api::close_reader(ptr);
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_execute_query(
     shard_view_ptr: i64,
@@ -177,13 +186,13 @@ pub unsafe extern "C" fn df_execute_query(
         .map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_get_schema(stream_ptr: i64) -> i64 {
     api::stream_get_schema(stream_ptr).map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_next(stream_ptr: i64) -> i64 {
     let mgr = get_rt_manager()?;
@@ -194,15 +203,17 @@ pub unsafe extern "C" fn df_stream_next(stream_ptr: i64) -> i64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_close(stream_ptr: i64) {
+    bind_thread(PLUGIN_ID.get().unwrap());
     api::stream_close(stream_ptr);
 }
 
 #[no_mangle]
 pub extern "C" fn df_cancel_query(context_id: i64) {
+    bind_thread(PLUGIN_ID.get().unwrap());
     api::cancel_query(context_id);
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_sql_to_substrait(
     shard_view_ptr: i64,
@@ -239,7 +250,7 @@ pub unsafe extern "C" fn df_sql_to_substrait(
 // ---------------------------------------------------------------------------
 // Coordinator-reduce local execution exports
 //
-// Mirror the shard-scan exports above: fallible entry points use `#[ffm_safe]`
+// Mirror the shard-scan exports above: fallible entry points use `#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]`
 // so `Err(String)` returns are converted into a negated heap-allocated error
 // string pointer that `NativeCall.invoke` reads and frees on the Java side.
 // Close functions are infallible and do not use the macro. The output stream
@@ -248,7 +259,7 @@ pub unsafe extern "C" fn df_sql_to_substrait(
 // `df_stream_close` paths unchanged.
 // ---------------------------------------------------------------------------
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_create_local_session(runtime_ptr: i64) -> i64 {
     api::create_local_session(runtime_ptr).map_err(|e| e.to_string())
@@ -272,7 +283,7 @@ pub unsafe extern "C" fn df_destroy_custom_cache_manager(ptr: i64) {
     }
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_register_partition_stream(
     session_ptr: i64,
@@ -287,7 +298,7 @@ pub unsafe extern "C" fn df_register_partition_stream(
     api::register_partition_stream(session_ptr, input_id, schema_ipc).map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_execute_local_plan(
     session_ptr: i64,
@@ -322,7 +333,7 @@ pub unsafe extern "C" fn df_execute_local_plan(
         .map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_sender_send(sender_ptr: i64, array_ptr: i64, schema_ptr: i64) -> i64 {
     let mgr = get_rt_manager()?;
@@ -345,7 +356,7 @@ pub unsafe extern "C" fn df_sender_close(sender_ptr: i64) {
 /// `i64`s, where each pair `(array_ptrs[i], schema_ptrs[i])` is a populated
 /// `FFI_ArrowArray` / `FFI_ArrowSchema` pair owned by the caller. On success
 /// Rust takes ownership; on error the structs are dropped on the Rust side.
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_register_memtable(
     session_ptr: i64,
@@ -376,7 +387,7 @@ pub unsafe extern "C" fn df_register_memtable(
         .map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_create_cache(
     cache_manager_ptr: i64,
@@ -432,7 +443,7 @@ pub unsafe extern "C" fn df_create_cache(
     Ok(0)
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_cache_manager_add_files(
     runtime_ptr: i64,
@@ -471,7 +482,7 @@ pub unsafe extern "C" fn df_cache_manager_add_files(
 // SessionContext decomposition — instruction-based execution
 // ---------------------------------------------------------------------------
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_create_session_context(
     shard_view_ptr: i64,
@@ -497,7 +508,7 @@ pub unsafe extern "C" fn df_create_session_context(
         .map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_create_session_context_indexed(
     shard_view_ptr: i64,
@@ -521,7 +532,7 @@ pub unsafe extern "C" fn df_create_session_context_indexed(
         .map_err(|e| e.to_string())
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_cache_manager_remove_files(
     runtime_ptr: i64,
@@ -555,7 +566,7 @@ pub unsafe extern "C" fn df_cache_manager_remove_files(
     Ok(0)
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_cache_manager_clear(runtime_ptr: i64) -> i64 {
     if runtime_ptr == 0 {
@@ -570,7 +581,7 @@ pub unsafe extern "C" fn df_cache_manager_clear(runtime_ptr: i64) -> i64 {
     Ok(0)
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_cache_manager_clear_by_type(
     runtime_ptr: i64,
@@ -593,7 +604,7 @@ pub unsafe extern "C" fn df_cache_manager_clear_by_type(
     Ok(0)
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_cache_manager_get_memory_by_type(
     runtime_ptr: i64,
@@ -615,7 +626,7 @@ pub unsafe extern "C" fn df_cache_manager_get_memory_by_type(
     Ok(size as i64)
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_cache_manager_get_total_memory(runtime_ptr: i64) -> i64 {
     if runtime_ptr == 0 {
@@ -628,7 +639,7 @@ pub unsafe extern "C" fn df_cache_manager_get_total_memory(runtime_ptr: i64) -> 
     Ok(manager.get_total_memory_consumed() as i64)
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_cache_manager_contains_by_type(
     runtime_ptr: i64,
@@ -660,7 +671,7 @@ pub unsafe extern "C" fn df_close_session_context(ptr: i64) {
     crate::session_context::close_session_context(ptr);
 }
 
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_execute_with_context(
     session_ctx_ptr: i64,
@@ -701,7 +712,7 @@ pub unsafe extern "C" fn df_execute_with_context(
 ///
 /// The buffer must have capacity for at least `size_of::<DfStatsBuffer>()` bytes (224).
 /// Returns 0 on success.
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_stats(out_ptr: *mut u8, out_cap: i64) -> i64 {
     use crate::stats::{layout, pack_runtime_metrics, pack_task_monitor, DfStatsBuffer, RuntimeMetricsRepr};
@@ -766,7 +777,7 @@ pub unsafe extern "C" fn df_stats(out_ptr: *mut u8, out_cap: i64) -> i64 {
 /// # Safety
 /// `handle_ptr` must be a valid pointer returned by `df_create_session_context`.
 /// `bytes_ptr` must point to `bytes_len` valid bytes of a Substrait plan.
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_prepare_partial_plan(
     handle_ptr: i64,
@@ -793,7 +804,7 @@ pub unsafe extern "C" fn df_prepare_partial_plan(
 /// # Safety
 /// `session_ptr` must be a valid pointer returned by `df_create_local_session`.
 /// `bytes_ptr` must point to `bytes_len` valid bytes of a Substrait plan.
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_prepare_final_plan(
     session_ptr: i64,
@@ -817,7 +828,7 @@ pub unsafe extern "C" fn df_prepare_final_plan(
 /// # Safety
 /// `session_ptr` must be a valid pointer returned by `df_create_local_session`
 /// with a plan already prepared via `df_prepare_final_plan`.
-#[ffm_safe]
+#[ffm_safe(plugin = crate::ffm::PLUGIN_ID)]
 #[no_mangle]
 pub unsafe extern "C" fn df_execute_local_prepared_plan(session_ptr: i64) -> i64 {
     let session = &*(session_ptr as *const crate::local_executor::LocalSession);

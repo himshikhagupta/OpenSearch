@@ -74,6 +74,9 @@ public class NativeBridgeModule extends Plugin {
         NativeAllocatorConfig.setDirtyDecayMs(JEMALLOC_DIRTY_DECAY_MS.get(settings));
         NativeAllocatorConfig.setMuzzyDecayMs(JEMALLOC_MUZZY_DECAY_MS.get(settings));
 
+        // Start native memory monitoring (per-plugin + jemalloc totals, every 10s)
+        NativeAllocatorConfig.startMonitor(10);
+
         // Register dynamic update listeners
         clusterService.getClusterSettings().addSettingsUpdateConsumer(JEMALLOC_DIRTY_DECAY_MS, NativeAllocatorConfig::setDirtyDecayMs);
         clusterService.getClusterSettings().addSettingsUpdateConsumer(JEMALLOC_MUZZY_DECAY_MS, NativeAllocatorConfig::setMuzzyDecayMs);
