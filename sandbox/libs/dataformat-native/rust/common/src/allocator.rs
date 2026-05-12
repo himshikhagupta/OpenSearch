@@ -35,28 +35,31 @@ use tikv_jemallocator::Jemalloc;
 pub const MAX_PLUGINS: usize = 16;
 
 /// Per-thread counter block. Each thread gets one, registered in THREAD_REGISTRY.
-/// Uses AtomicI64 so other threads can read (sum) without data races, but each
-/// thread only writes to its own block — no contention.
+/// Hot path uses `local` (Cell, zero-cost increment). Stats reader sums `published` (AtomicI64).
+/// Flush happens every FLUSH_OPS operations, amortizing the atomic store.
 #[repr(C)]
 struct ThreadCounterBlock {
-    deltas: [AtomicI64; MAX_PLUGINS],
+    /// Atomically-visible counters. Updated by flush, read by stats.
+    published: [AtomicI64; MAX_PLUGINS],
 }
 
 impl ThreadCounterBlock {
     const fn new() -> Self {
         Self {
-            deltas: [const { AtomicI64::new(0) }; MAX_PLUGINS],
+            published: [const { AtomicI64::new(0) }; MAX_PLUGINS],
         }
     }
 }
 
-/// Global registry of all thread counter blocks. Locked only on thread start/exit and stats read.
+/// Number of alloc/dealloc ops before flushing local deltas to published counters.
+const FLUSH_OPS: u32 = 1024;
+
+/// Global registry of all thread counter blocks. Locked only on thread start and stats read.
 static THREAD_REGISTRY: Mutex<Vec<&'static ThreadCounterBlock>> = Mutex::new(Vec::new());
 
 thread_local! {
-    /// Each thread's private counter block. Leaked to 'static so the registry pointer stays valid.
-    static MY_COUNTERS: &'static ThreadCounterBlock = {
-        // Temporarily mark as initializing to prevent re-entrancy during Box::new
+    /// Each thread's private counter block (published side). Leaked to 'static so the registry pointer stays valid.
+    static MY_BLOCK: &'static ThreadCounterBlock = {
         INITIALIZING.with(|f| f.set(true));
         let block: &'static ThreadCounterBlock = Box::leak(Box::new(ThreadCounterBlock::new()));
         THREAD_REGISTRY.lock().unwrap().push(block);
@@ -64,11 +67,58 @@ thread_local! {
         block
     };
 
+    /// Fast thread-local accumulators. Only this thread writes — no atomics needed.
+    static LOCAL_DELTAS: Cell<[i64; MAX_PLUGINS]> = const { Cell::new([0i64; MAX_PLUGINS]) };
+
+    /// Op counter for flush scheduling.
+    static OPS_COUNT: Cell<u32> = const { Cell::new(0) };
+
     /// Current plugin ID for this thread. 0 = untagged (startup, JNI callback threads, etc.)
     static CURRENT_PLUGIN: Cell<u8> = const { Cell::new(0) };
 
-    /// Re-entrancy guard: true while MY_COUNTERS is being initialized.
+    /// Re-entrancy guard: true while MY_BLOCK is being initialized.
     static INITIALIZING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Increment the thread-local accumulator. Flushes to published AtomicI64 every FLUSH_OPS.
+#[inline(always)]
+fn track_delta(plugin_id: u8, delta: i64) {
+    LOCAL_DELTAS.with(|d| {
+        let mut arr = d.get();
+        arr[plugin_id as usize] += delta;
+        d.set(arr);
+    });
+    OPS_COUNT.with(|c| {
+        let n = c.get() + 1;
+        if n >= FLUSH_OPS {
+            flush_to_published();
+            c.set(0);
+        } else {
+            c.set(n);
+        }
+    });
+}
+
+/// Flush local deltas to the published AtomicI64 counters.
+#[inline(never)]
+fn flush_to_published() {
+    MY_BLOCK.with(|block| {
+        LOCAL_DELTAS.with(|d| {
+            let arr = d.get();
+            for (i, &delta) in arr.iter().enumerate() {
+                if delta != 0 {
+                    block.published[i].fetch_add(delta, Ordering::Relaxed);
+                }
+            }
+            d.set([0i64; MAX_PLUGINS]);
+        });
+    });
+}
+
+/// Force-flush the current thread's deltas. Call before reading stats for accuracy.
+pub fn flush_thread_deltas() {
+    flush_to_published();
+    OPS_COUNT.with(|c| c.set(0));
 }
 
 /// The underlying jemalloc allocator we delegate to.
@@ -101,7 +151,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 
         let plugin_id = CURRENT_PLUGIN.with(|c| c.get());
         *ptr.add(layout.size()) = plugin_id;
-        MY_COUNTERS.with(|c| c.deltas[plugin_id as usize].fetch_add(layout.size() as i64, Ordering::Relaxed));
+        track_delta(plugin_id, layout.size() as i64);
         ptr
     }
 
@@ -118,7 +168,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 
         let plugin_id = CURRENT_PLUGIN.with(|c| c.get());
         *ptr.add(layout.size()) = plugin_id;
-        MY_COUNTERS.with(|c| c.deltas[plugin_id as usize].fetch_add(layout.size() as i64, Ordering::Relaxed));
+        track_delta(plugin_id, layout.size() as i64);
         ptr
     }
 
@@ -140,7 +190,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             return;
         }
 
-        MY_COUNTERS.with(|c| c.deltas[plugin_id as usize].fetch_sub(layout.size() as i64, Ordering::Relaxed));
+        track_delta(plugin_id, -(layout.size() as i64));
         JEMALLOC.dealloc(ptr, wrapped);
     }
 
@@ -179,11 +229,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         // Write trailer at new position
         *new_ptr.add(new_size) = plugin_id;
         // Update counters
-        MY_COUNTERS.with(|c| {
-            let d = &c.deltas[plugin_id as usize];
-            d.fetch_add(new_size as i64, Ordering::Relaxed);
-            d.fetch_sub(layout.size() as i64, Ordering::Relaxed);
-        });
+        track_delta(plugin_id, (new_size as i64) - (layout.size() as i64));
 
         new_ptr
     }
@@ -259,10 +305,12 @@ pub fn plugin_live_bytes_by_id(plugin_id: u8) -> usize {
     if (plugin_id as usize) >= MAX_PLUGINS {
         return 0;
     }
+    // Flush current thread's pending deltas so the read is accurate
+    flush_to_published();
     let registry = THREAD_REGISTRY.lock().unwrap();
     let mut total: i64 = 0;
     for block in registry.iter() {
-        total += block.deltas[plugin_id as usize].load(Ordering::Relaxed);
+        total += block.published[plugin_id as usize].load(Ordering::Relaxed);
     }
     total.max(0) as usize
 }
